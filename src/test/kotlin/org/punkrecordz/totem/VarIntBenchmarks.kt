@@ -5,7 +5,7 @@ import org.openjdk.jmh.infra.Blackhole
 import org.openjdk.jmh.runner.Runner
 import org.openjdk.jmh.runner.options.OptionsBuilder
 import org.punkrecordz.totem.tag.ByteArrayTag
-import org.punkrecordz.totem.impl.native.ShortArrayView
+import org.punkrecordz.totem.impl.native.NativeShortView
 import org.punkrecordz.totem.impl.native.NativeByteArrayTag
 import org.punkrecordz.totem.ffi.TotemSys
 import org.punkrecordz.totem.io.MemoryLayouts
@@ -28,12 +28,12 @@ open class VarIntBenchmarks {
     private lateinit var arena: Arena
     private lateinit var heapShortArray: ShortArray
     private lateinit var heapVarIntBytes: ByteArray
-    private var offHeapShortView = ShortArrayView(MemorySegment.NULL)
+    private var offHeapShortView = NativeShortView(MemorySegment.NULL)
     private lateinit var offHeapVarIntTag: ByteArrayTag
 
     private lateinit var destinationHeapShortArray: ShortArray
     private lateinit var destinationHeapVarIntBytes: ByteArray
-    private var destinationOffHeapShortView = ShortArrayView(MemorySegment.NULL)
+    private var destinationOffHeapShortView = NativeShortView(MemorySegment.NULL)
     private lateinit var destinationOffHeapVarIntSegment: MemorySegment
 
     companion object {
@@ -65,7 +65,7 @@ open class VarIntBenchmarks {
 
         heapVarIntBytes = heapShortArray.toVarIntBytes()
 
-        offHeapShortView = ShortArrayView.of(
+        offHeapShortView = NativeShortView.of(
             heapShortArray,
             arena,
         )
@@ -73,7 +73,7 @@ open class VarIntBenchmarks {
 
         destinationHeapShortArray = ShortArray(VOLUME)
         destinationHeapVarIntBytes = ByteArray(VOLUME * 3 + 12)
-        destinationOffHeapShortView = ShortArrayView.of(VOLUME, arena)
+        destinationOffHeapShortView = NativeShortView.of(VOLUME, arena)
         destinationOffHeapVarIntSegment = arena.allocateUninitialized(VOLUME * 3L + 12L)
     }
 

@@ -2,7 +2,7 @@ package org.punkrecordz.totem
 
 import org.junit.jupiter.api.Test
 import org.punkrecordz.totem.impl.heap.HeapByteArrayTag
-import org.punkrecordz.totem.impl.native.ShortArrayView
+import org.punkrecordz.totem.impl.native.NativeShortView
 import org.punkrecordz.totem.view.toVarIntByteArray
 import org.punkrecordz.totem.view.toVarIntShortArray
 import java.lang.foreign.Arena
@@ -28,7 +28,7 @@ class PropertyTests {
                     }
                 }
 
-                val view = ShortArrayView.of(array, arena)
+                val view = NativeShortView.of(array, arena)
                 val encodedTag = view.toVarIntByteArray(arena)
                 val decodedView = encodedTag.toVarIntShortArray(array.size, arena)
                 val decodedArray = decodedView.pin()

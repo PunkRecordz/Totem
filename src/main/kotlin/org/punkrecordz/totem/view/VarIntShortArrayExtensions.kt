@@ -1,13 +1,23 @@
 package org.punkrecordz.totem.view
 
 import org.punkrecordz.totem.impl.native.NativeByteArrayTag
-import org.punkrecordz.totem.impl.native.ShortArrayView
+import org.punkrecordz.totem.impl.native.NativeShortView
 import org.punkrecordz.totem.ffi.TotemSys
 import org.punkrecordz.totem.io.MemoryLayouts
 import org.punkrecordz.totem.io.allocateUninitialized
 import org.punkrecordz.totem.tag.ByteArrayTag
 import java.lang.foreign.Arena
 
+/**
+ * Strategy: Decodes the VarInt compressed byte data inside this [ByteView] into a zero-allocation off-heap [ShortView].
+ *
+ * Performance targets:
+ * - Directly delegate decoding loop to the native totem-sys Rust library.
+ * - Zero JVM heap allocations.
+ *
+ * @param expectedSize The number of Short elements expected in the decoded view.
+ * @param arena The FFM Arena to allocate the off-heap MemorySegment for the resulting view.
+ */
 fun ByteView.toVarIntShortArray(
     expectedSize: Int,
     arena: Arena,
@@ -16,7 +26,7 @@ fun ByteView.toVarIntShortArray(
         throw IllegalArgumentException("Only native off-heap tags can be decoded using native VarInt translation.")
     }
 
-    val view = ShortArrayView.of(
+    val view = NativeShortView.of(
         expectedSize,
         arena,
     )
@@ -33,11 +43,20 @@ fun ByteView.toVarIntShortArray(
     return view
 }
 
+/**
+ * Strategy: Encodes this [ShortView] into a VarInt compressed [ByteArrayTag] off-heap.
+ *
+ * Performance targets:
+ * - Single-pass encoding directly to off-heap segment.
+ * - No intermediate array copy or JVM heap allocation.
+ *
+ * @param arena The FFM Arena to allocate the off-heap MemorySegment for the resulting ByteArrayTag.
+ */
 fun ShortView.toVarIntByteArray(
     arena: Arena,
 ): ByteArrayTag {
-    if (this !is ShortArrayView) {
-        throw IllegalArgumentException("Only ShortArrayView is supported for native VarInt encoding.")
+    if (this !is NativeShortView) {
+        throw IllegalArgumentException("Only NativeShortView is supported for native VarInt encoding.")
     }
 
     val maxPossibleSize = size.toLong() * 3L + MemoryLayouts.INT.byteSize() + 8L

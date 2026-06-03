@@ -10,7 +10,7 @@ import java.nio.ByteOrder
 import java.util.function.IntConsumer
 
 @JvmInline
-value class ShortArrayView(
+value class NativeShortView(
     val segment: MemorySegment,
 ) : ShortView {
 
@@ -19,7 +19,7 @@ value class ShortArrayView(
 
     override operator fun get(index: Int): Short {
         if (index !in 0..<size) {
-            throw IndexOutOfBoundsException("Index $index is out of bounds for ShortArrayView of size $size.")
+            throw IndexOutOfBoundsException("Index $index is out of bounds for NativeShortView of size $size.")
         }
 
         return segment.get(
@@ -30,7 +30,7 @@ value class ShortArrayView(
 
     override operator fun set(index: Int, value: Short) {
         if (index !in 0..<size) {
-            throw IndexOutOfBoundsException("Index $index is out of bounds for ShortArrayView of size $size.")
+            throw IndexOutOfBoundsException("Index $index is out of bounds for NativeShortView of size $size.")
         }
 
         segment.set(
@@ -39,7 +39,6 @@ value class ShortArrayView(
             value,
         )
     }
-
 
     fun copyInto(
         destination: ShortArray,
@@ -371,17 +370,17 @@ value class ShortArrayView(
             .toArray(NATIVE_SHORT)
     }
 
-    override fun copy(): ShortArrayView {
+    override fun copy(): NativeShortView {
         val newSegment = Arena.ofAuto().allocateUninitialized(segment.byteSize())
         MemorySegment.copy(segment, 0L, newSegment, 0L, segment.byteSize())
 
-        return ShortArrayView(newSegment)
+        return NativeShortView(newSegment)
     }
 
     companion object {
         val NATIVE_SHORT: ValueLayout.OfShort = ValueLayout.JAVA_SHORT_UNALIGNED.withOrder(ByteOrder.nativeOrder())
 
-        fun of(array: ShortArray, arena: Arena): ShortArrayView {
+        fun of(array: ShortArray, arena: Arena): NativeShortView {
             val byteSize = MemoryLayouts.INT.byteSize() + (array.size.toLong() * MemoryLayouts.SHORT.byteSize())
             val segment = arena.allocateUninitialized(byteSize)
             segment.set(MemoryLayouts.INT, 0L, array.size)
@@ -395,15 +394,15 @@ value class ShortArrayView(
                 array.size.toLong() * Short.SIZE_BYTES,
             )
 
-            return ShortArrayView(segment)
+            return NativeShortView(segment)
         }
 
-        fun of(size: Int, arena: Arena): ShortArrayView {
+        fun of(size: Int, arena: Arena): NativeShortView {
             val byteSize = MemoryLayouts.INT.byteSize() + (size.toLong() * MemoryLayouts.SHORT.byteSize())
             val segment = arena.allocateUninitialized(byteSize)
             segment.set(MemoryLayouts.INT, 0L, size)
 
-            return ShortArrayView(segment)
+            return NativeShortView(segment)
         }
     }
 
