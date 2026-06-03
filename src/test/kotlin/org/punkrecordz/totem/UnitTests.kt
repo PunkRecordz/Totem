@@ -1,9 +1,9 @@
 package org.punkrecordz.totem
 
 import org.junit.jupiter.api.Test
+import org.punkrecordz.totem.impl.native.NativeByteArrayTag
 import org.punkrecordz.totem.tag.TagType
 import org.punkrecordz.totem.tag.Tags
-import org.punkrecordz.totem.impl.native.NativeByteArrayTag
 import java.lang.foreign.Arena
 import java.lang.foreign.ValueLayout
 import kotlin.test.assertEquals

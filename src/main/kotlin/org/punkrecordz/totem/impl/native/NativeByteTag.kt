@@ -3,12 +3,13 @@ package org.punkrecordz.totem.impl.native
 import org.punkrecordz.totem.impl.heap.HeapByteTag
 import org.punkrecordz.totem.io.MemoryLayouts
 import org.punkrecordz.totem.tag.ByteTag
+import org.punkrecordz.totem.view.NativeView
 import java.lang.foreign.MemorySegment
 
 @JvmInline
 value class NativeByteTag(
-    private val segment: MemorySegment,
-) : ByteTag {
+    override val segment: MemorySegment,
+) : ByteTag, NativeView {
 
     override val value: Byte get() = segment.get(MemoryLayouts.BYTE, 0L)
 

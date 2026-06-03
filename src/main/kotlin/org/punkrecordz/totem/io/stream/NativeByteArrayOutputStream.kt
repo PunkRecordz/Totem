@@ -22,6 +22,7 @@ class NativeByteArrayOutputStream(
     private val singleByte = ByteBuffer.allocate(1)
     private var currentSegment: MemorySegment
     private var position = 0L
+
     // tracking remap count to issue diagnostics in case of excessive virtual memory churn
     private var remapCount = 0
 

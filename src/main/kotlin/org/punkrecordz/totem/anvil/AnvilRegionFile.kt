@@ -12,7 +12,7 @@ import java.lang.foreign.ValueLayout
 import java.nio.ByteOrder
 import java.nio.channels.FileChannel
 import java.nio.file.StandardOpenOption
-import java.util.BitSet
+import java.util.*
 import java.util.concurrent.locks.StampedLock
 
 class AnvilRegionFile(
@@ -36,27 +36,27 @@ class AnvilRegionFile(
     private val timestamps = IntArray(CHUNK_COUNT)
     private val usedSectors = BitSet()
     private val lock: StampedLock? = if (writeMode) StampedLock() else null
-    
+
     @Volatile
     private var closed = false
 
     init {
         file.parentFile?.mkdirs()
-        
+
         var tempChannel: FileChannel? = null
         var tempSegment: MemorySegment? = null
         try {
             if (writeMode) {
                 val exists = file.exists()
                 val size = if (exists) file.length() else 0L
-                
+
                 tempChannel = FileChannel.open(
                     file.toPath(),
                     StandardOpenOption.CREATE,
                     StandardOpenOption.READ,
                     StandardOpenOption.WRITE,
                 )
-                
+
                 tempSegment = null
 
                 if (!exists || size < HEADER_SIZE) {
@@ -73,13 +73,13 @@ class AnvilRegionFile(
             } else {
                 tempChannel = FileChannel.open(file.toPath(), StandardOpenOption.READ)
                 val size = tempChannel.size()
-                
+
                 tempSegment = if (size >= HEADER_SIZE) {
                     tempChannel.map(FileChannel.MapMode.READ_ONLY, 0L, size, arena)
                 } else {
                     null
                 }
-                
+
                 loadHeadersFromMapping(tempSegment)
                 recalculateUsedSectors()
             }
@@ -106,7 +106,7 @@ class AnvilRegionFile(
             if (closed) {
                 throw IllegalStateException("AnvilRegionFile is closed.")
             }
-            
+
             return readChunksFromOffsets()
         }
 
@@ -121,7 +121,7 @@ class AnvilRegionFile(
                 if (closed) {
                     throw IllegalStateException("AnvilRegionFile is closed.")
                 }
-                
+
                 return readChunksFromOffsets()
             } finally {
                 activeLock.unlockRead(readStamp)
@@ -147,7 +147,7 @@ class AnvilRegionFile(
                 )
             }
         }
-        
+
         return chunks
     }
 
@@ -160,7 +160,7 @@ class AnvilRegionFile(
             if (closed) {
                 throw IllegalStateException("AnvilRegionFile is closed.")
             }
-            
+
             return performReadChunk(globalX, globalZ, targetArena)
         }
 
@@ -170,7 +170,7 @@ class AnvilRegionFile(
             if (closed) {
                 throw IllegalStateException("AnvilRegionFile is closed.")
             }
-            
+
             return performReadChunk(globalX, globalZ, targetArena)
         } finally {
             activeLock.unlockRead(stamp)
@@ -297,7 +297,10 @@ class AnvilRegionFile(
                 headerSegment.set(ValueLayout.JAVA_INT.withOrder(ByteOrder.BIG_ENDIAN), 4L, newTimestamp)
 
                 channel.write(headerSegment.asSlice(0, 4).asByteBuffer(), chunkIndex.toLong() * 4L)
-                channel.write(headerSegment.asSlice(4, 4).asByteBuffer(), SECTOR_SIZE.toLong() + chunkIndex.toLong() * 4L)
+                channel.write(
+                    headerSegment.asSlice(4, 4).asByteBuffer(),
+                    SECTOR_SIZE.toLong() + chunkIndex.toLong() * 4L
+                )
             } finally {
                 activeLock.unlockWrite(stamp)
             }
@@ -321,8 +324,12 @@ class AnvilRegionFile(
         if (segment == null) return
 
         for (index in 0 until CHUNK_COUNT) {
-            offsets[index] = segment.get(ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.BIG_ENDIAN), (index * 4).toLong())
-            timestamps[index] = segment.get(ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.BIG_ENDIAN), (SECTOR_SIZE + index * 4).toLong())
+            offsets[index] =
+                segment.get(ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.BIG_ENDIAN), (index * 4).toLong())
+            timestamps[index] = segment.get(
+                ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.BIG_ENDIAN),
+                (SECTOR_SIZE + index * 4).toLong()
+            )
         }
     }
 
@@ -336,8 +343,12 @@ class AnvilRegionFile(
             activeChannel.read(headerSegment.asByteBuffer(), 0L)
 
             for (index in 0 until CHUNK_COUNT) {
-                offsets[index] = headerSegment.get(ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.BIG_ENDIAN), index * 4L)
-                timestamps[index] = headerSegment.get(ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.BIG_ENDIAN), (SECTOR_SIZE + index * 4L))
+                offsets[index] =
+                    headerSegment.get(ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.BIG_ENDIAN), index * 4L)
+                timestamps[index] = headerSegment.get(
+                    ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.BIG_ENDIAN),
+                    (SECTOR_SIZE + index * 4L)
+                )
             }
         }
     }
@@ -368,12 +379,20 @@ class AnvilRegionFile(
 
                 Arena.ofConfined().use { tempArena ->
                     val headerSegment = tempArena.allocateUninitialized(HEADER_SIZE.toLong())
-                    
+
                     for (index in 0 until CHUNK_COUNT) {
-                        headerSegment.set(ValueLayout.JAVA_INT.withOrder(ByteOrder.BIG_ENDIAN), index * 4L, offsets[index])
-                        headerSegment.set(ValueLayout.JAVA_INT.withOrder(ByteOrder.BIG_ENDIAN), SECTOR_SIZE + index * 4L, timestamps[index])
+                        headerSegment.set(
+                            ValueLayout.JAVA_INT.withOrder(ByteOrder.BIG_ENDIAN),
+                            index * 4L,
+                            offsets[index]
+                        )
+                        headerSegment.set(
+                            ValueLayout.JAVA_INT.withOrder(ByteOrder.BIG_ENDIAN),
+                            SECTOR_SIZE + index * 4L,
+                            timestamps[index]
+                        )
                     }
-                    
+
                     channel.write(headerSegment.asByteBuffer(), 0L)
                 }
 

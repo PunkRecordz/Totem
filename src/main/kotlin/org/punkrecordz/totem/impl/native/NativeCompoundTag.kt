@@ -6,13 +6,14 @@ import org.punkrecordz.totem.io.MemoryLayouts
 import org.punkrecordz.totem.tag.CompoundTag
 import org.punkrecordz.totem.tag.TagType
 import org.punkrecordz.totem.tag.contract.Tag
+import org.punkrecordz.totem.view.NativeView
 import java.lang.foreign.MemorySegment
 import java.util.*
 
 @JvmInline
 value class NativeCompoundTag(
-    private val segment: MemorySegment,
-) : CompoundTag {
+    override val segment: MemorySegment,
+) : CompoundTag, NativeView {
 
     override val size: Int
         get() {

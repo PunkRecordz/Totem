@@ -1,9 +1,9 @@
 package org.punkrecordz.totem.io.stream
 
+import org.punkrecordz.totem.codec.ProtocolRegistry
 import org.punkrecordz.totem.impl.native.NativeByteArrayTag
 import org.punkrecordz.totem.impl.native.NativeIntArrayTag
 import org.punkrecordz.totem.impl.native.NativeLongArrayTag
-import org.punkrecordz.totem.codec.ProtocolRegistry
 import org.punkrecordz.totem.io.allocateUninitialized
 import org.punkrecordz.totem.tag.TagType
 import org.punkrecordz.totem.tag.contract.Tag

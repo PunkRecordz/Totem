@@ -40,7 +40,7 @@ class GzipCompression(val level: Int = 1) : Compression {
         try {
             val output = arena.allocateUninitialized(uncompressedSize)
             val decompressor = gzipDecompressor.get()
-            
+
             val inputBuffer = input.asByteBuffer()
             val outputBuffer = output.asByteBuffer()
 
@@ -67,7 +67,7 @@ class GzipCompression(val level: Int = 1) : Compression {
         val compressor = gzipCompressors.get().getOrPut(level) {
             LibdeflateCompressor(level)
         }
-        
+
         val bound = compressor.gzipCompressBound(input.byteSize().toInt()).toLong()
         val output = arena.allocateUninitialized(bound)
 

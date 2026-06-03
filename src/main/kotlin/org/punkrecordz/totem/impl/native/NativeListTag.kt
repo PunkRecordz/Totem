@@ -7,12 +7,13 @@ import org.punkrecordz.totem.tag.ListTag
 import org.punkrecordz.totem.tag.TagType
 import org.punkrecordz.totem.tag.contract.Tag
 import org.punkrecordz.totem.tag.contract.TagKey
+import org.punkrecordz.totem.view.NativeView
 import java.lang.foreign.MemorySegment
 
 @JvmInline
 value class NativeListTag<T : Tag>(
-    private val segment: MemorySegment,
-) : ListTag<T> {
+    override val segment: MemorySegment,
+) : ListTag<T>, NativeView {
 
     override val elementType: TagKey
         get() {
