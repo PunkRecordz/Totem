@@ -14,4 +14,3 @@ interface LongArrayTag : Tag, PinnableTag<LongArrayTag>, LongView {
     override fun copy(): LongArrayTag
 
 }
-

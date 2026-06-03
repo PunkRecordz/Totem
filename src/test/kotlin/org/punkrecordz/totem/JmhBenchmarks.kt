@@ -44,7 +44,11 @@ open class JmhBenchmarks {
             val blocksCompound = schematic.getCompound("Blocks")!!
 
             val blocks = blocksCompound.getByteArray("Data")?.toVarIntShortArray(volume, arena)!!
-            blocks.replace(0.toShort(), 1.toShort())
+            for (index in 0 until blocks.size) {
+                if (blocks[index] == 0.toShort()) {
+                    blocks[index] = 1.toShort()
+                }
+            }
 
             val modifiedData = blocks.toVarIntByteArray(arena)
 

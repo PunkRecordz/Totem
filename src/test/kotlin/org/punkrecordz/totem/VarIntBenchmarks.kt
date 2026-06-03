@@ -4,16 +4,16 @@ import org.openjdk.jmh.annotations.*
 import org.openjdk.jmh.infra.Blackhole
 import org.openjdk.jmh.runner.Runner
 import org.openjdk.jmh.runner.options.OptionsBuilder
-import org.punkrecordz.totem.tag.ByteArrayTag
-import org.punkrecordz.totem.impl.native.NativeShortView
-import org.punkrecordz.totem.impl.native.NativeByteArrayTag
 import org.punkrecordz.totem.ffi.TotemSys
+import org.punkrecordz.totem.impl.native.NativeByteArrayTag
+import org.punkrecordz.totem.impl.native.NativeShortView
 import org.punkrecordz.totem.io.MemoryLayouts
-import org.punkrecordz.totem.view.toVarIntByteArray
 import org.punkrecordz.totem.io.allocateUninitialized
+import org.punkrecordz.totem.tag.ByteArrayTag
+import org.punkrecordz.totem.view.toVarIntByteArray
 import java.lang.foreign.Arena
 import java.lang.foreign.MemorySegment
-import java.util.Random
+import java.util.*
 import java.util.concurrent.TimeUnit
 
 @State(Scope.Thread)

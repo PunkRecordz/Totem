@@ -39,9 +39,12 @@ class IntegrationTests {
                 if (blocksCompound != null) {
                     val dataView = blocksCompound.getByteArray("Data")?.toVarIntShortArray(volume, arena)
                     if (dataView != null) {
-                        // 2. Perform zero-allocation modification (replace air 0 with stone 1)
                         val originalSize = dataView.size
-                        dataView.replace(0.toShort(), 1.toShort())
+                        for (index in 0 until originalSize) {
+                            if (dataView[index] == 0.toShort()) {
+                                dataView[index] = 1.toShort()
+                            }
+                        }
 
                         // 3. Re-encode block data
                         val modifiedData = dataView.toVarIntByteArray(arena)
