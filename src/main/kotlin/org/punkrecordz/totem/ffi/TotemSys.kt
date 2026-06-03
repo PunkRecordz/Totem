@@ -86,9 +86,9 @@ object TotemSys {
     private fun getArchName(): String {
         val architectureName = System.getProperty("os.arch").lowercase()
 
-        return when {
-            architectureName == "amd64" || architectureName == "x86_64" || architectureName == "x64" -> "x86_64"
-            architectureName == "aarch64" || architectureName == "arm64" -> "aarch64"
+        return when (architectureName) {
+            "amd64", "x86_64", "x64" -> "x86_64"
+            "aarch64", "arm64" -> "aarch64"
             else -> throw UnsupportedOperationException("Unsupported Architecture: $architectureName")
         }
     }

@@ -2,9 +2,7 @@ package org.punkrecordz.totem
 
 import org.junit.jupiter.api.Test
 import org.punkrecordz.totem.anvil.AnvilRegionFile
-import org.punkrecordz.totem.tag.CompoundTag
 import org.punkrecordz.totem.tag.Tags
-import java.io.File
 import java.lang.foreign.Arena
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
@@ -39,8 +37,6 @@ class ThreadSafetyTests {
                 executorService.submit {
                     try {
                         for (chunkIndex in 0 until chunksPerThread) {
-                            val chunkX = threadIndex
-                            val chunkZ = chunkIndex
                             val value = threadIndex * 100 + chunkIndex
 
                             val tag = Tags.compound {
@@ -48,13 +44,13 @@ class ThreadSafetyTests {
                             }
 
                             regionFile.writeChunk(
-                                chunkX,
-                                chunkZ,
+                                threadIndex,
+                                chunkIndex,
                                 "Root",
                                 tag,
                             )
 
-                            writtenValues[Pair(chunkX, chunkZ)] = value
+                            writtenValues[Pair(threadIndex, chunkIndex)] = value
                         }
                     } catch (exception: Exception) {
                         failureCount.incrementAndGet()

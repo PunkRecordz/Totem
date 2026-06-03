@@ -6,9 +6,7 @@ import org.punkrecordz.totem.impl.native.NativeShortView
 import org.punkrecordz.totem.view.toVarIntByteArray
 import org.punkrecordz.totem.view.toVarIntShortArray
 import java.lang.foreign.Arena
-import java.util.Arrays
 import java.util.Random
-import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 class PropertyTests {
@@ -37,19 +35,19 @@ class PropertyTests {
                 val expectedEncodedBytes = array.toVarIntBytes()
 
                 assertTrue(
-                    Arrays.equals(heapEncodedBytes, expectedEncodedBytes),
+                    heapEncodedBytes.contentEquals(expectedEncodedBytes),
                     "Encoded bytes mismatch at iteration $iteration.",
                 )
 
                 val heapDecodedArray = heapEncodedBytes.toVarInt(array.size)
 
                 assertTrue(
-                    Arrays.equals(array, heapDecodedArray),
+                    array.contentEquals(heapDecodedArray),
                     "Classical heap decoded array mismatch at iteration $iteration.",
                 )
 
                 assertTrue(
-                    Arrays.equals(array, decodedArray),
+                    array.contentEquals(decodedArray),
                     "Off-heap decoded array mismatch at iteration $iteration.",
                 )
             }

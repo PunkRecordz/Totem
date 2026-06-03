@@ -45,7 +45,7 @@ class IntegrationTests {
 
                         // 3. Re-encode block data
                         val modifiedData = dataView.toVarIntByteArray(arena)
-                        blocksCompound.put("Data", modifiedData)
+                        blocksCompound["Data"] = modifiedData
 
                         // 4. Save to temporary output
                         Totem.save(name, root, tempOutputFile, CompressionType.GZIP)
@@ -104,4 +104,5 @@ class IntegrationTests {
         }
         return destination
     }
+
 }

@@ -10,7 +10,6 @@ import org.punkrecordz.totem.impl.native.NativeByteArrayTag
 import org.punkrecordz.totem.ffi.TotemSys
 import org.punkrecordz.totem.io.MemoryLayouts
 import org.punkrecordz.totem.view.toVarIntByteArray
-import org.punkrecordz.totem.view.toVarIntShortArray
 import org.punkrecordz.totem.io.allocateUninitialized
 import java.lang.foreign.Arena
 import java.lang.foreign.MemorySegment

@@ -61,9 +61,9 @@ fun getPlatformDirectoryName(): String {
         else -> throw GradleException("Unsupported OS: ${operatingSystem.name}")
     }
     
-    val archName = when {
-        architecture == "amd64" || architecture == "x86_64" || architecture == "x64" -> "x86_64"
-        architecture == "aarch64" || architecture == "arm64" -> "aarch64"
+    val archName = when (architecture) {
+        "amd64", "x86_64", "x64" -> "x86_64"
+        "aarch64", "arm64" -> "aarch64"
         else -> throw GradleException("Unsupported architecture: $architecture")
     }
     
