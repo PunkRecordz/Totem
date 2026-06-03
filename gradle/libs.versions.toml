@@ -1,0 +1,18 @@
+[versions]
+kotlin = "2.3.20"
+jlibdeflate = "0.1.0"
+querz-nbt = "6.1"
+jmh = "1.37"
+kotest = "5.9.0"
+
+[libraries]
+kotlin-stdlib = { group = "org.jetbrains.kotlin", name = "kotlin-stdlib-jdk8", version.ref = "kotlin" }
+kotlin-test = { group = "org.jetbrains.kotlin", name = "kotlin-test", version.ref = "kotlin" }
+jlibdeflate = { group = "com.fulcrumgenomics", name = "jlibdeflate", version.ref = "jlibdeflate" }
+querz-nbt = { group = "com.github.Querz", name = "NBT", version.ref = "querz-nbt" }
+jmh-core = { group = "org.openjdk.jmh", name = "jmh-core", version.ref = "jmh" }
+jmh-generator = { group = "org.openjdk.jmh", name = "jmh-generator-annprocess", version.ref = "jmh" }
+kotest-property = { group = "io.kotest", name = "kotest-property", version.ref = "kotest" }
+
+[plugins]
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
