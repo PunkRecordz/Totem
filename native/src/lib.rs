@@ -61,9 +61,9 @@ pub unsafe extern "C" fn decode_varint_shorts(
             // fast path: decode 4 1-byte VarInts in parallel
             let packed_64 = packed as u64;
             let expanded = (packed_64 & 0xFF) |
-                           ((packed_64 & 0xFF00) << 8) |
-                           ((packed_64 & 0xFF0000) << 16) |
-                           ((packed_64 & 0xFF000000) << 24);
+                ((packed_64 & 0xFF00) << 8) |
+                ((packed_64 & 0xFF0000) << 16) |
+                ((packed_64 & 0xFF000000) << 24);
 
             let destination_pointer = unsafe { destination.as_mut_ptr().add(destination_offset) } as *mut u64;
             unsafe { core::ptr::write_unaligned(destination_pointer, expanded.to_le()) };
@@ -123,8 +123,8 @@ unsafe fn encode_single_branchless(value: u16, destination: &mut [u8], offset: u
     let v2 = ((value >> 14) & 0x7F) as u32;
 
     let out = (v0 | (f1 & 0x80)) |
-              ((v1 | (f2 & 0x80)) << 8) |
-              (v2 << 16);
+        ((v1 | (f2 & 0x80)) << 8) |
+        (v2 << 16);
 
     let pointer = unsafe { destination.as_mut_ptr().add(offset) } as *mut u32;
     unsafe { core::ptr::write_unaligned(pointer, out.to_le()) };
@@ -147,9 +147,9 @@ unsafe fn encode_parallel_4(
 
     if (packed_shorts & 0xFF80FF80FF80FF80) == 0 {
         let compressed = ((packed_shorts & 0xFF) |
-                          ((packed_shorts & 0xFF0000) >> 8) |
-                          ((packed_shorts & 0xFF00000000) >> 16) |
-                          ((packed_shorts & 0xFF000000000000) >> 24)) as u32;
+            ((packed_shorts & 0xFF0000) >> 8) |
+            ((packed_shorts & 0xFF00000000) >> 16) |
+            ((packed_shorts & 0xFF000000000000) >> 24)) as u32;
 
         let destination_pointer = unsafe { destination.as_mut_ptr().add(destination_offset) } as *mut u32;
         unsafe { core::ptr::write_unaligned(destination_pointer, compressed.to_le()); }

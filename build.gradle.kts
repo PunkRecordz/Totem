@@ -53,20 +53,20 @@ dependencies {
 fun getPlatformDirectoryName(): String {
     val operatingSystem = OperatingSystem.current()
     val architecture = System.getProperty("os.arch").lowercase()
-    
+
     val osName = when {
         operatingSystem.isWindows -> "windows"
         operatingSystem.isMacOsX -> "macos"
         operatingSystem.isLinux -> "linux"
         else -> throw GradleException("Unsupported OS: ${operatingSystem.name}")
     }
-    
+
     val archName = when (architecture) {
         "amd64", "x86_64", "x64" -> "x86_64"
         "aarch64", "arm64" -> "aarch64"
         else -> throw GradleException("Unsupported architecture: $architecture")
     }
-    
+
     return "${osName}_${archName}"
 }
 

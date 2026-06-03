@@ -1,11 +1,6 @@
 package org.punkrecordz.totem.ffi
 
-import java.lang.foreign.Arena
-import java.lang.foreign.FunctionDescriptor
-import java.lang.foreign.Linker
-import java.lang.foreign.MemorySegment
-import java.lang.foreign.SymbolLookup
-import java.lang.foreign.ValueLayout
+import java.lang.foreign.*
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
@@ -70,7 +65,6 @@ object TotemSys {
         ) as Long
     }
 
-    // detect operating system name
     private fun getPlatformName(): String {
         val operatingSystemName = System.getProperty("os.name").lowercase()
 
@@ -82,18 +76,14 @@ object TotemSys {
         }
     }
 
-    // detect cpu architecture
     private fun getArchName(): String {
-        val architectureName = System.getProperty("os.arch").lowercase()
-
-        return when (architectureName) {
+        return when (val architectureName = System.getProperty("os.arch").lowercase()) {
             "amd64", "x86_64", "x64" -> "x86_64"
             "aarch64", "arm64" -> "aarch64"
             else -> throw UnsupportedOperationException("Unsupported Architecture: $architectureName")
         }
     }
 
-    // map platform name to standard dynamic library name
     private fun getLibraryFileName(platform: String): String {
         return when (platform) {
             "windows" -> "totem_sys.dll"
@@ -103,7 +93,6 @@ object TotemSys {
         }
     }
 
-    // resolve and load the appropriate totem-sys library
     private fun loadNativeLibrary(): SymbolLookup {
         val operatingSystem = getPlatformName()
         val cpuArchitecture = getArchName()
@@ -121,7 +110,6 @@ object TotemSys {
             }
         }
 
-        // extract and load library from packaged classpath natives directory
         val resourcePath = "/natives/${operatingSystem}_${cpuArchitecture}/$libraryName"
         val resourceUrl = TotemSys::class.java.getResource(resourcePath)
             ?: throw UnsatisfiedLinkError("Native library $libraryName not found in resources at $resourcePath")
