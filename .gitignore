@@ -167,8 +167,9 @@ gradle-app.setting
 # JDT-specific (Eclipse Java Development Tools)
 .classpath
 
-### Gradle Patch ###
 # Java heap dump
 *.hprof
+
+/src/main/resources/natives/
 
 # End of https://www.toptal.com/developers/gitignore/api/kotlin,intellij+all,java,rust,gradle
