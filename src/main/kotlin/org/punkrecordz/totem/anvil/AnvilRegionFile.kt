@@ -193,9 +193,9 @@ class AnvilRegionFile(
 
         return if (mappedSegment != null) {
             val chunkSegment = mappedSegment.asSlice(fileOffset, sectorCount.toLong() * SECTOR_SIZE)
-            val length = chunkSegment.get(ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.BIG_ENDIAN), 0L)
+            val length = chunkSegment.get(ValueLayout.JAVA_INT.withOrder(ByteOrder.BIG_ENDIAN), 0L)
 
-            if (length > sectorCount * SECTOR_SIZE) return null
+            if (length > sectorCount * SECTOR_SIZE || length <= 1) return null
 
             val compressionType = chunkSegment.get(ValueLayout.JAVA_BYTE, 4L).toInt()
             val compressedSegment = chunkSegment.asSlice(5L, length - 1L)
@@ -208,15 +208,18 @@ class AnvilRegionFile(
 
             Totem.load(compressedSegment, targetArena, compression)
         } else {
-            val headerSegment = targetArena.allocateUninitialized(5L)
-            channel.read(headerSegment.asByteBuffer(), fileOffset)
+            val sectorBytes = sectorCount.toLong() * SECTOR_SIZE
+            val tempBuffer = targetArena.allocateUninitialized(sectorBytes)
 
-            val length = headerSegment.get(ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.BIG_ENDIAN), 0L)
-            if (length > sectorCount * SECTOR_SIZE) return null
+            channel.read(tempBuffer.asByteBuffer(), fileOffset)
 
-            val compressionType = headerSegment.get(ValueLayout.JAVA_BYTE, 4L).toInt()
+            val length = tempBuffer.get(ValueLayout.JAVA_INT.withOrder(ByteOrder.BIG_ENDIAN), 0L)
+            if (length > sectorBytes || length <= 1) return null
+
+            val compressionType = tempBuffer.get(ValueLayout.JAVA_BYTE, 4L).toInt()
             val compressedSegment = targetArena.allocateUninitialized(length - 1L)
-            channel.read(compressedSegment.asByteBuffer(), fileOffset + 5L)
+
+            MemorySegment.copy(tempBuffer, 5L, compressedSegment, 0L, length - 1L)
 
             val compression = when (compressionType) {
                 COMPRESSION_GZIP -> CompressionType.GZIP
@@ -323,13 +326,11 @@ class AnvilRegionFile(
     private fun loadHeadersFromMapping(segment: MemorySegment?) {
         if (segment == null) return
 
+        val intLayout = ValueLayout.JAVA_INT.withOrder(ByteOrder.BIG_ENDIAN)
+
         for (index in 0 until CHUNK_COUNT) {
-            offsets[index] =
-                segment.get(ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.BIG_ENDIAN), (index * 4).toLong())
-            timestamps[index] = segment.get(
-                ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.BIG_ENDIAN),
-                (SECTOR_SIZE + index * 4).toLong()
-            )
+            offsets[index] = segment.get(intLayout, index * 4L)
+            timestamps[index] = segment.get(intLayout, SECTOR_SIZE + index * 4L)
         }
     }
 
@@ -342,13 +343,11 @@ class AnvilRegionFile(
             val headerSegment = tempArena.allocateUninitialized(HEADER_SIZE.toLong())
             activeChannel.read(headerSegment.asByteBuffer(), 0L)
 
+            val intLayout = ValueLayout.JAVA_INT.withOrder(ByteOrder.BIG_ENDIAN)
+
             for (index in 0 until CHUNK_COUNT) {
-                offsets[index] =
-                    headerSegment.get(ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.BIG_ENDIAN), index * 4L)
-                timestamps[index] = headerSegment.get(
-                    ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.BIG_ENDIAN),
-                    (SECTOR_SIZE + index * 4L)
-                )
+                offsets[index] = headerSegment.get(intLayout, index * 4L)
+                timestamps[index] = headerSegment.get(intLayout, SECTOR_SIZE + index * 4L)
             }
         }
     }
