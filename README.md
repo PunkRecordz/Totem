@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="assets/totem.png" width="128" height="128" style="image-rendering: pixelated; image-rendering: crisp-edges;" />
+  <img src="assets/totem.png" width="128" height="128" />
   <h1 align="center" style="margin-top: 10px;">Totem</h1>
 </div>
 
