@@ -35,8 +35,14 @@ fun main(arguments: Array<String>) {
     val length = size
     val volume = width * height * length
 
-    // Generate a simple byte array filled with 0s (representing Air/Stone VarInts)
+    // Generate a pseudo-random sequence of block IDs using a high-quality 64-bit LCG.
+    // This provides realistic high-entropy data, simulating a complex world build.
     val blockData = ByteArray(volume)
+    var seed = 12345L
+    for (index in 0 until volume) {
+        seed = seed * 2862933555777941757L + 3037000493L
+        blockData[index] = ((seed ushr 56) and 127L).toByte()
+    }
 
     outputPath.parent?.createDirectories()
 
