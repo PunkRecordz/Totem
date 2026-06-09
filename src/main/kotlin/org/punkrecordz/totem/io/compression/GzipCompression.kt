@@ -5,7 +5,7 @@ import com.fulcrumgenomics.jlibdeflate.LibdeflateDecompressor
 import org.punkrecordz.totem.io.allocateUninitialized
 import java.io.ByteArrayOutputStream
 import java.io.EOFException
-import java.io.InputStream
+import org.punkrecordz.totem.io.ByteBufferInputStream
 import java.lang.foreign.Arena
 import java.lang.foreign.MemorySegment
 import java.lang.foreign.ValueLayout
@@ -114,36 +114,6 @@ class GzipCompression(val level: Int = 1) : Compression {
 
             return outputSegment
         }
-    }
-
-}
-
-internal class ByteBufferInputStream(
-    private val byteBuffer: ByteBuffer,
-) : InputStream() {
-
-    override fun read(): Int {
-        if (!byteBuffer.hasRemaining()) {
-            return -1
-        }
-
-        return byteBuffer.get().toInt() and 0xFF
-    }
-
-    override fun read(
-        byteArray: ByteArray,
-        offset: Int,
-        length: Int,
-    ): Int {
-        if (!byteBuffer.hasRemaining()) {
-            return -1
-        }
-
-        val bytesToRead = minOf(length, byteBuffer.remaining())
-
-        byteBuffer.get(byteArray, offset, bytesToRead)
-
-        return bytesToRead
     }
 
 }

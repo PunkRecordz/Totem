@@ -2,6 +2,7 @@ package org.punkrecordz.totem.io.compression
 
 import com.fulcrumgenomics.jlibdeflate.LibdeflateCompressor
 import com.fulcrumgenomics.jlibdeflate.LibdeflateDecompressor
+import org.punkrecordz.totem.io.ByteBufferInputStream
 import org.punkrecordz.totem.io.allocateUninitialized
 import java.io.ByteArrayOutputStream
 import java.io.EOFException
