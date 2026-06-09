@@ -11,16 +11,12 @@
 
 Totem is a high-performance, zero-allocation Named Binary Tag (NBT) library for Kotlin/JVM. It leverages Project Panama's native capabilities and a native Rust companion library (`totem-sys`) to achieve maximum throughput with minimal garbage collection pressure. Requires JDK 24 or higher.
 
----
-
 ## Key Features
 
 * **Off-Heap Execution**: Traverse and query huge NBT data trees without generating GC pressure.
 * **High-Volume Translations**: Accelerated native VarInt decoders specifically designed for massive block manipulations.
 * **Direct Anvil Operations**: Fast, memory-mapped read and write operations on Minecraft region files (`.mca`).
 * **Kotlin DSL**: An expressive, tree-based builder API for constructing clean NBT trees.
-
----
 
 ## Technical Architecture
 
@@ -41,8 +37,6 @@ Minecraft block data relies heavily on [VarInt and VarLong encoding](https://min
 
 > [!TIP]
 > **16-Bit Optimization (RAM Savings)**: Because a schematic block palette mathematically cannot exceed 65,536 unique states (fitting within an unsigned short), Totem decodes VarInt data directly into 16-bit `Short` arrays instead of standard 32-bit `Int` arrays. This is a deliberate design trade-off that halves the memory footprint (saving 50% RAM), prioritizing speed and memory efficiency. If full 32-bit VarInt range is needed for other structures in the future, a dedicated method can be added.
-
----
 
 ## Performance Benchmark
 
@@ -68,8 +62,6 @@ The screenshots below show the CLI execution times when downgrading a massive sc
 #### With Totem (Panama FFM + Rust)
 ![With Totem](assets/with-totem.png)
 
----
-
 ## Dependency
 
 Add the dependency to your `build.gradle.kts` using GitHub Packages:
@@ -89,8 +81,6 @@ dependencies {
     implementation("org.punkrecordz:totem:1.0.0")
 }
 ```
-
----
 
 ## Usage Examples
 
@@ -142,8 +132,6 @@ Totem.write(Path.of("output.dat")) {
     }
 }
 ```
-
----
 
 ## Building
 
