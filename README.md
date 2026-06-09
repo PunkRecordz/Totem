@@ -125,10 +125,10 @@ import org.punkrecordz.totem.Totem
 import java.nio.file.Path
 
 Totem.write(Path.of("output.dat")) {
-    putInt("DataVersion", 3463)
-    putCompound("Player") {
-        putString("Name", "Steve")
-        putDouble("Health", 20.0)
+    int("DataVersion", 3463)
+    compound("Player") {
+        string("Name", "Steve")
+        double("Health", 20.0)
     }
 }
 ```
@@ -140,3 +140,25 @@ To compile the native Rust library and package the JAR:
 ```bash
 ./gradlew jar
 ```
+
+## Testing & Benchmarking
+
+To run the test suite:
+
+```bash
+./gradlew test
+```
+
+### Generating Synthetic Schematics
+
+To run benchmarks or profile performance without using private builds, you can generate a synthetic Sponge schematic with any block volume:
+
+```bash
+# Generate a 1 Million block schematic (100x100x100)
+./gradlew generateSyntheticSchematic -Psize=100
+
+# Generate a 1 Billion block schematic (1000x1000x1000)
+./gradlew generateSyntheticSchematic -Psize=1000
+```
+
+The output file will be saved under `src/test/resources/` (e.g., `synthetic_100x100x100.schem`) and is automatically ignored by Git.

@@ -139,5 +139,24 @@ kotlin {
     jvmToolchain(24)
 }
 
+tasks.register<JavaExec>("generateSyntheticSchematic") {
+    dependsOn("compileRust")
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass = "org.punkrecordz.totem.tool.GenerateSyntheticSchematicKt"
+
+    val sizeVal = project.findProperty("size") as String? ?: "200"
+    val fileVal = project.findProperty("output") as String? ?: "src/test/resources/synthetic_${sizeVal}x${sizeVal}x${sizeVal}.schem"
+    args = listOf(sizeVal, fileVal)
+
+    jvmArgs(
+        "--enable-native-access=ALL-UNNAMED",
+        "--add-opens", "java.base/jdk.internal.foreign=ALL-UNNAMED",
+        "--add-modules", "jdk.incubator.vector",
+        "-Xms2g",
+        "-Xmx4g",
+    )
+}
+
+
 
 

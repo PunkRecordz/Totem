@@ -172,4 +172,8 @@ gradle-app.setting
 
 /src/main/resources/natives/
 
+# Ignore generated synthetic test schematics
+/src/test/resources/synthetic_*.schem
+temp_*.schem
+
 # End of https://www.toptal.com/developers/gitignore/api/kotlin,intellij+all,java,rust,gradle
