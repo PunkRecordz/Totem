@@ -40,12 +40,12 @@ Minecraft block data relies heavily on [VarInt and VarLong encoding](https://min
 
 ## Performance Benchmark
 
-In an end-to-end NBT pipeline test (loading a compressed schematic, parsing it, modifying block IDs in a volume, and serializing/saving back to a GZIP file):
+In an end-to-end NBT pipeline test (loading a compressed schematic of 44 million blocks (`18578.schem`), parsing it, modifying block IDs in a volume, and serializing/saving back to a GZIP file):
 
 | Library | Avg Time / Operation | Performance |
 | :--- | :--- | :--- |
-| **Querz NBT** (Standard Java NBT) | 20,816.51 ms | Baseline |
-| **Totem (FFM + Rust)** | **6,593.87 ms** | **3.15x Faster** |
+| **Querz NBT** (Standard Java NBT) | 1,216.59 ms | Baseline |
+| **Totem (FFM + Rust)** | **216.40 ms** | **5.62x Faster** |
 
 *Measured on JDK 24 (HotSpot 64-Bit Server VM).*
 
@@ -140,25 +140,3 @@ To compile the native Rust library and package the JAR:
 ```bash
 ./gradlew jar
 ```
-
-## Testing & Benchmarking
-
-To run the test suite:
-
-```bash
-./gradlew test
-```
-
-### Generating Synthetic Schematics
-
-To run benchmarks or profile performance without using private builds, you can generate a synthetic Sponge schematic with any block volume:
-
-```bash
-# Generate a 1 Million block schematic (100x100x100)
-./gradlew generateSyntheticSchematic -Psize=100
-
-# Generate a 1 Billion block schematic (1000x1000x1000)
-./gradlew generateSyntheticSchematic -Psize=1000
-```
-
-The output file will be saved under `src/test/resources/` (e.g., `synthetic_100x100x100.schem`) and is automatically ignored by Git.

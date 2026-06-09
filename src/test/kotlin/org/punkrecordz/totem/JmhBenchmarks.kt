@@ -22,7 +22,7 @@ import net.querz.nbt.tag.CompoundTag as QuerzCompoundTag
 @Fork(1)
 open class JmhBenchmarks {
 
-    private val schematicPath = Path("src/test/resources/small-schem-to-test.schem")
+    private val schematicPath = Path("src/test/resources/18578.schem")
     private val tempTotemPath = Path("temp_totem_benchmark.schem")
     private val tempQuerzPath = Path("temp_querz_benchmark.schem")
 
@@ -36,14 +36,21 @@ open class JmhBenchmarks {
     fun benchmarkTotemPipeline(): Long {
         Arena.ofConfined().use { arena ->
             val (name, root) = Totem.load(schematicPath, arena)
-            val schematic = root.getCompound("Schematic")!!
+
+            // support both sponge schematic v2 and v3 formats
+            val schematic = if (root.containsKey("Width")) root else root.getCompound("Schematic")!!
             val width = schematic.getShort("Width")!!.toInt()
             val height = schematic.getShort("Height")!!.toInt()
             val length = schematic.getShort("Length")!!.toInt()
             val volume = width * height * length
-            val blocksCompound = schematic.getCompound("Blocks")!!
 
-            val blocks = blocksCompound.getByteArray("Data")?.toVarIntShortArray(volume, arena)!!
+            val dataTag = if (schematic.containsKey("BlockData")) {
+                schematic.getByteArray("BlockData")!!
+            } else {
+                schematic.getCompound("Blocks")!!.getByteArray("Data")!!
+            }
+
+            val blocks = dataTag.toVarIntShortArray(volume, arena)
             for (index in 0 until blocks.size) {
                 if (blocks[index] == 0.toShort()) {
                     blocks[index] = 1.toShort()
@@ -52,33 +59,46 @@ open class JmhBenchmarks {
 
             val modifiedData = blocks.toVarIntByteArray(arena)
 
-            // Rebuild NBT hierarchy because native tags are immutable off-heap views
-            val newBlocksCompound = Tags.compound().apply {
-                for ((key, value) in blocksCompound) {
-                    if (key == "Data") {
-                        put(key, modifiedData)
-                    } else {
-                        put(key, value)
+            // rebuild nbt hierarchy because native tags are immutable off-heap views
+            val newRoot = if (root.containsKey("Width")) {
+                Tags.compound().apply {
+                    for ((key, value) in root) {
+                        if (key == "BlockData") {
+                            put(key, modifiedData)
+                        } else {
+                            put(key, value)
+                        }
                     }
                 }
-            }
-
-            val newSchematic = Tags.compound().apply {
-                for ((key, value) in schematic) {
-                    if (key == "Blocks") {
-                        put(key, newBlocksCompound)
-                    } else {
-                        put(key, value)
+            } else {
+                val blocksCompound = schematic.getCompound("Blocks")!!
+                val newBlocksCompound = Tags.compound().apply {
+                    for ((key, value) in blocksCompound) {
+                        if (key == "Data") {
+                            put(key, modifiedData)
+                        } else {
+                            put(key, value)
+                        }
                     }
                 }
-            }
 
-            val newRoot = Tags.compound().apply {
-                for ((key, value) in root) {
-                    if (key == "Schematic") {
-                        put(key, newSchematic)
-                    } else {
-                        put(key, value)
+                val newSchematic = Tags.compound().apply {
+                    for ((key, value) in schematic) {
+                        if (key == "Blocks") {
+                            put(key, newBlocksCompound)
+                        } else {
+                            put(key, value)
+                        }
+                    }
+                }
+
+                Tags.compound().apply {
+                    for ((key, value) in root) {
+                        if (key == "Schematic") {
+                            put(key, newSchematic)
+                        } else {
+                            put(key, value)
+                        }
                     }
                 }
             }
@@ -92,16 +112,21 @@ open class JmhBenchmarks {
     fun benchmarkQuerzPipeline(): Long {
         val namedTag = NBTUtil.read(schematicPath.toFile())
         val root = namedTag.tag as QuerzCompoundTag
-        val schematic = root.getCompoundTag("Schematic")
+
+        // support both sponge schematic v2 and v3 formats
+        val schematic = if (root.containsKey("Width")) root else root.getCompoundTag("Schematic")
         val width = schematic.getShort("Width").toInt()
         val height = schematic.getShort("Height").toInt()
         val length = schematic.getShort("Length").toInt()
         val volume = width * height * length
-        val blocksCompound = schematic.getCompoundTag("Blocks")
 
-        val dataBytes = blocksCompound.getByteArray("Data")
+        val dataBytes = if (schematic.containsKey("BlockData")) {
+            schematic.getByteArray("BlockData")
+        } else {
+            schematic.getCompoundTag("Blocks").getByteArray("Data")
+        }
+
         val blocks = dataBytes.toVarInt(volume)
-
         for (i in blocks.indices) {
             if (blocks[i] == 0.toShort()) {
                 blocks[i] = 1.toShort()
@@ -109,7 +134,11 @@ open class JmhBenchmarks {
         }
 
         val modifiedBytes = blocks.toVarIntBytes()
-        blocksCompound.putByteArray("Data", modifiedBytes)
+        if (schematic.containsKey("BlockData")) {
+            schematic.putByteArray("BlockData", modifiedBytes)
+        } else {
+            schematic.getCompoundTag("Blocks").putByteArray("Data", modifiedBytes)
+        }
 
         NBTUtil.write(namedTag, tempQuerzPath.toFile())
         return tempQuerzPath.toFile().length()
@@ -166,5 +195,7 @@ open class JmhBenchmarks {
                 .build()
             Runner(options).run()
         }
+
     }
+
 }
