@@ -127,86 +127,51 @@ value class NativeCompoundTag(
     }
 
     private fun findEntry(key: String): EntryInfo? {
-        var isAscii = true
-        for (index in key.indices) {
-            if (key[index].code >= 128) {
-                isAscii = false
-                break
-            }
-        }
-
-        if (isAscii) {
-            val keyLength = key.length
-            var offset = 0L
-            val byteSize = MemoryLayouts.BYTE.byteSize()
-            val shortSize = MemoryLayouts.SHORT.byteSize()
-
-            while (true) {
-                val typeId = segment.get(MemoryLayouts.BYTE, offset).toInt()
-                if (typeId == TagType.END.id) break
-
-                offset += byteSize
-                val nameLength = segment.get(MemoryLayouts.SHORT, offset).toInt() and 0xFFFF
-
-                if (nameLength == keyLength) {
-                    var match = true
-                    for (index in 0 until nameLength) {
-                        val segmentByte = segment.get(MemoryLayouts.BYTE, offset + shortSize + index)
-                        if (segmentByte != key[index].code.toByte()) {
-                            match = false
-                            break
-                        }
-                    }
-
-                    if (match) {
-                        val valueOffset = offset + shortSize + nameLength
-                        return EntryInfo(
-                            name = key,
-                            typeId = typeId,
-                            valueOffset = valueOffset,
-                        )
-                    }
-                }
-
-                val valueOffset = offset + shortSize + nameLength
-                val protocol = ProtocolRegistry.getOrThrow(typeId)
-                val entrySize = protocol.calculateSize(segment, valueOffset)
-
-                // ensure offset strictly advances to prevent infinite traversal loops
-                if (entrySize <= 0) {
-                    throw IllegalStateException("Calculated non-positive entry size: $entrySize for tag ID $typeId at offset $valueOffset")
-                }
-
-                offset = valueOffset + entrySize
-            }
-
+        val characterLength = key.length
+        if (characterLength > 65535) {
             return null
         }
 
-        val keyBytes = key.toByteArray(Charsets.UTF_8)
-        val keyLength = keyBytes.size
+        val isPureAscii = MemoryLayouts.isAsciiWithoutNull(key)
+        val keyBytes = if (!isPureAscii) {
+            try {
+                MemoryLayouts.encodeString(key)
+            } catch (_: IllegalArgumentException) {
+                return null
+            }
+        } else {
+            null
+        }
+
+        val expectedLength = keyBytes?.size ?: characterLength
         var offset = 0L
         val byteSize = MemoryLayouts.BYTE.byteSize()
         val shortSize = MemoryLayouts.SHORT.byteSize()
 
         while (true) {
             val typeId = segment.get(MemoryLayouts.BYTE, offset).toInt()
-            if (typeId == TagType.END.id) break
+            if (typeId == TagType.END.id) {
+                break
+            }
 
             offset += byteSize
             val nameLength = segment.get(MemoryLayouts.SHORT, offset).toInt() and 0xFFFF
+            val valueOffset = offset + shortSize + nameLength
 
-            if (nameLength == keyLength) {
-                var match = true
+            if (nameLength == expectedLength) {
+                var matches = true
+
                 for (index in 0 until nameLength) {
-                    if (segment.get(MemoryLayouts.BYTE, offset + shortSize + index) != keyBytes[index]) {
-                        match = false
+                    val segmentByte = segment.get(MemoryLayouts.BYTE, offset + shortSize + index)
+                    val expectedByte = keyBytes?.get(index) ?: key[index].code.toByte()
+
+                    if (segmentByte != expectedByte) {
+                        matches = false
                         break
                     }
                 }
 
-                if (match) {
-                    val valueOffset = offset + shortSize + nameLength
+                if (matches) {
                     return EntryInfo(
                         name = key,
                         typeId = typeId,
@@ -215,11 +180,9 @@ value class NativeCompoundTag(
                 }
             }
 
-            val valueOffset = offset + shortSize + nameLength
             val protocol = ProtocolRegistry.getOrThrow(typeId)
             val entrySize = protocol.calculateSize(segment, valueOffset)
 
-            // ensure offset strictly advances to prevent infinite traversal loops
             if (entrySize <= 0) {
                 throw IllegalStateException("Calculated non-positive entry size: $entrySize for tag ID $typeId at offset $valueOffset")
             }

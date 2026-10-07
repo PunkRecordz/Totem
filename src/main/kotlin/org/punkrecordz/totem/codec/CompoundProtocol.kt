@@ -14,7 +14,6 @@ object CompoundProtocol : TagProtocol<CompoundTag> {
 
     override fun calculateSize(segment: MemorySegment, offset: Long): Long {
         var currentOffset = offset
-
         val byteSize = MemoryLayouts.BYTE.byteSize()
         val shortSize = MemoryLayouts.SHORT.byteSize()
 
@@ -45,44 +44,16 @@ object CompoundProtocol : TagProtocol<CompoundTag> {
 
     override fun write(segment: MemorySegment, offset: Long, tag: CompoundTag): Long {
         var currentOffset = offset
-
         val byteSize = MemoryLayouts.BYTE.byteSize()
-        val shortSize = MemoryLayouts.SHORT.byteSize()
 
         for ((key, value) in tag) {
-            val tagValue = value
-
-            segment.set(MemoryLayouts.BYTE, currentOffset, tagValue.key.id.toByte())
+            segment.set(MemoryLayouts.BYTE, currentOffset, value.key.id.toByte())
             currentOffset += byteSize
 
-            var isAscii = true
-            for (index in key.indices) {
-                if (key[index].code >= 128) {
-                    isAscii = false
-                    break
-                }
-            }
+            currentOffset += MemoryLayouts.writeString(segment, currentOffset, key)
 
-            if (isAscii) {
-                segment.set(MemoryLayouts.SHORT, currentOffset, key.length.toShort())
-                currentOffset += shortSize
-
-                for (index in key.indices) {
-                    segment.set(MemoryLayouts.BYTE, currentOffset + index, key[index].code.toByte())
-                }
-                currentOffset += key.length
-            } else {
-                val nameBytes = key.toByteArray(Charsets.UTF_8)
-
-                segment.set(MemoryLayouts.SHORT, currentOffset, nameBytes.size.toShort())
-                currentOffset += shortSize
-
-                MemorySegment.copy(MemorySegment.ofArray(nameBytes), 0, segment, currentOffset, nameBytes.size.toLong())
-                currentOffset += nameBytes.size
-            }
-
-            val protocol = ProtocolRegistry.getOrThrow(tagValue.key.id)
-            currentOffset += protocol.write(segment, currentOffset, tagValue)
+            val protocol = ProtocolRegistry.getOrThrow(value.key.id)
+            currentOffset += protocol.write(segment, currentOffset, value)
         }
 
         segment.set(MemoryLayouts.BYTE, currentOffset, TagType.END.id.toByte())
@@ -94,29 +65,15 @@ object CompoundProtocol : TagProtocol<CompoundTag> {
     override fun sizeOf(tag: CompoundTag): Long {
         var totalSize = 0L
         val byteSize = MemoryLayouts.BYTE.byteSize()
-        val shortSize = MemoryLayouts.SHORT.byteSize()
 
         for ((key, value) in tag) {
             totalSize += byteSize
+            totalSize += MemoryLayouts.SHORT.byteSize() + MemoryLayouts.stringByteLength(key)
 
-            var isAscii = true
-            for (index in key.indices) {
-                if (key[index].code >= 128) {
-                    isAscii = false
-                    break
-                }
-            }
-
-            val nameBytesLength = if (isAscii) {
-                key.length
-            } else {
-                key.toByteArray(Charsets.UTF_8).size
-            }
-
-            totalSize += shortSize + nameBytesLength
             val protocol = ProtocolRegistry.getOrThrow(value.key.id)
             totalSize += protocol.sizeOf(value)
         }
+
         totalSize += byteSize
         return totalSize
     }

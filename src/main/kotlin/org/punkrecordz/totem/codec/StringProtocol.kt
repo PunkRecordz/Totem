@@ -21,49 +21,11 @@ object StringProtocol : TagProtocol<StringTag> {
     }
 
     override fun write(segment: MemorySegment, offset: Long, tag: StringTag): Long {
-        val stringValue = tag.value
-        val shortSize = MemoryLayouts.SHORT.byteSize()
-
-        var isAscii = true
-        for (index in stringValue.indices) {
-            if (stringValue[index].code >= 128) {
-                isAscii = false
-                break
-            }
-        }
-
-        if (isAscii) {
-            segment.set(MemoryLayouts.SHORT, offset, stringValue.length.toShort())
-            for (index in stringValue.indices) {
-                segment.set(MemoryLayouts.BYTE, offset + shortSize + index, stringValue[index].code.toByte())
-            }
-            return shortSize + stringValue.length
-        } else {
-            val bytes = stringValue.toByteArray(Charsets.UTF_8)
-            segment.set(MemoryLayouts.SHORT, offset, bytes.size.toShort())
-            MemorySegment.copy(MemorySegment.ofArray(bytes), 0, segment, offset + shortSize, bytes.size.toLong())
-            return shortSize + bytes.size
-        }
+        return MemoryLayouts.writeString(segment, offset, tag.value)
     }
 
     override fun sizeOf(tag: StringTag): Long {
-        val stringValue = tag.value
-
-        var isAscii = true
-        for (index in stringValue.indices) {
-            if (stringValue[index].code >= 128) {
-                isAscii = false
-                break
-            }
-        }
-
-        val bytesLength = if (isAscii) {
-            stringValue.length.toLong()
-        } else {
-            stringValue.toByteArray(Charsets.UTF_8).size.toLong()
-        }
-
-        return MemoryLayouts.SHORT.byteSize() + bytesLength
+        return MemoryLayouts.SHORT.byteSize() + MemoryLayouts.stringByteLength(tag.value)
     }
 
 }
