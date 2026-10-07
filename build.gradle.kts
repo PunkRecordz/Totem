@@ -7,7 +7,7 @@ plugins {
 }
 
 group = "org.punkrecordz"
-version = "1.0.1"
+version = "1.0.2"
 
 java {
     withSourcesJar()
