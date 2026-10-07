@@ -1,6 +1,11 @@
 package org.punkrecordz.totem.ffi
 
-import java.lang.foreign.*
+import java.lang.foreign.Arena
+import java.lang.foreign.FunctionDescriptor
+import java.lang.foreign.Linker
+import java.lang.foreign.MemorySegment
+import java.lang.foreign.SymbolLookup
+import java.lang.foreign.ValueLayout
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
@@ -44,13 +49,29 @@ object TotemSys {
         sourceSlice: MemorySegment,
         destinationSlice: MemorySegment,
         expectedSize: Int,
-    ) {
-        decodeMethodHandle.invoke(
+    ): Long {
+        val result = decodeMethodHandle.invoke(
             sourceSlice,
             sourceSlice.byteSize(),
             destinationSlice,
             expectedSize,
-        )
+        ) as Long
+
+        if (result < 0L) {
+            when (result) {
+                -1L -> throw IllegalArgumentException(
+                    "Malformed VarInt data: byte buffer was truncated in the middle of a VarInt sequence.",
+                )
+                -2L -> throw IllegalArgumentException(
+                    "Incomplete VarInt data: expected $expectedSize elements, but buffer contained fewer VarInt values.",
+                )
+                else -> throw IllegalArgumentException(
+                    "Failed to decode VarInt data: native decoder returned error code $result.",
+                )
+            }
+        }
+
+        return result
     }
 
     fun encodeShortsVarInt(

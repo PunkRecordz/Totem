@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test
 import org.punkrecordz.totem.impl.native.NativeByteArrayTag
 import org.punkrecordz.totem.tag.TagType
 import org.punkrecordz.totem.tag.Tags
+import org.punkrecordz.totem.view.toVarIntShortArray
 import java.lang.foreign.Arena
 import java.lang.foreign.ValueLayout
 import kotlin.test.assertEquals
@@ -199,5 +200,37 @@ class UnitTests {
         }
     }
 
+    @Test
+    fun testTruncatedVarIntThrowsException() {
+        Arena.ofConfined().use { arena ->
+            val nativeByteArray = Tags.nativeByteArray(2, arena)
+            val segment = (nativeByteArray as NativeByteArrayTag).segment
+
+            segment.set(ValueLayout.JAVA_BYTE, 4L, 0x01.toByte())
+            segment.set(ValueLayout.JAVA_BYTE, 5L, 0x80.toByte())
+
+            assertFailsWith<IllegalArgumentException> {
+                nativeByteArray.toVarIntShortArray(2, arena)
+            }
+        }
+    }
+
+    @Test
+    fun testIncompleteVarIntsThrowsException() {
+        Arena.ofConfined().use { arena ->
+            val nativeByteArray = Tags.nativeByteArray(3, arena)
+            val segment = (nativeByteArray as NativeByteArrayTag).segment
+
+            segment.set(ValueLayout.JAVA_BYTE, 4L, 1.toByte())
+            segment.set(ValueLayout.JAVA_BYTE, 5L, 2.toByte())
+            segment.set(ValueLayout.JAVA_BYTE, 6L, 3.toByte())
+
+            assertFailsWith<IllegalArgumentException> {
+                nativeByteArray.toVarIntShortArray(400, arena)
+            }
+        }
+    }
+
 }
+
 
