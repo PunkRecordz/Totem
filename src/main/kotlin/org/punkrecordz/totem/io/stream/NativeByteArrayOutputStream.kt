@@ -127,10 +127,10 @@ class NativeByteArrayOutputStream(
     }
 
     fun writeString(text: String) {
-        val bytes = text.toByteArray(Charsets.UTF_8)
+        val encodedBytes = MemoryLayouts.encodeString(text)
 
-        writeShort(bytes.size.toShort())
-        writeByteArray(bytes)
+        writeShort(encodedBytes.size.toShort())
+        writeByteArray(encodedBytes)
     }
 
     fun writeSegment(

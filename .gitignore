@@ -176,4 +176,7 @@ gradle-app.setting
 /src/test/resources/synthetic_*.schem
 temp_*.schem
 
+# Visual Studio Code
+.vscode/
+
 # End of https://www.toptal.com/developers/gitignore/api/kotlin,intellij+all,java,rust,gradle

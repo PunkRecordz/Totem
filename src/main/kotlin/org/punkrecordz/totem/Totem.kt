@@ -20,7 +20,6 @@ import java.nio.channels.FileChannel
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
 
-
 object Totem {
 
     fun load(
@@ -98,22 +97,20 @@ object Totem {
         arena: Arena,
         compression: Compression = CompressionType.NONE,
     ): MemorySegment {
-        val nameBytes = name.toByteArray(Charsets.UTF_8)
-        val nameLength = nameBytes.size.toShort()
-        val headerSize = MemoryLayouts.BYTE.byteSize() + MemoryLayouts.SHORT.byteSize() + nameBytes.size
-
+        val headerSize =
+            MemoryLayouts.BYTE.byteSize() + MemoryLayouts.SHORT.byteSize() + MemoryLayouts.stringByteLength(name)
         val contentSize = CompoundProtocol.sizeOf(root)
         val totalSize = headerSize + contentSize
 
         if (compression === CompressionType.NONE) {
             val uncompressedSegment = arena.allocateUninitialized(totalSize)
-            writeUncompressed(uncompressedSegment, nameBytes, nameLength, root)
+            writeUncompressed(uncompressedSegment, name, root)
             return uncompressedSegment
         }
 
         return Arena.ofConfined().use { tempArena ->
             val uncompressedSegment = tempArena.allocateUninitialized(totalSize)
-            writeUncompressed(uncompressedSegment, nameBytes, nameLength, root)
+            writeUncompressed(uncompressedSegment, name, root)
             compression.compress(uncompressedSegment, arena)
         }
     }
@@ -216,18 +213,13 @@ object Totem {
         }
     }
 
-
-    private fun writeUncompressed(segment: MemorySegment, nameBytes: ByteArray, nameLength: Short, root: CompoundTag) {
+    private fun writeUncompressed(segment: MemorySegment, name: String, root: CompoundTag) {
         segment.set(MemoryLayouts.BYTE, 0L, TagType.COMPOUND.id.toByte())
 
-        var offset = MemoryLayouts.BYTE.byteSize()
-        segment.set(MemoryLayouts.SHORT, offset, nameLength)
-        offset += MemoryLayouts.SHORT.byteSize()
+        val writtenLength = MemoryLayouts.writeString(segment, MemoryLayouts.BYTE.byteSize(), name)
+        val contentOffset = MemoryLayouts.BYTE.byteSize() + writtenLength
 
-        MemorySegment.copy(MemorySegment.ofArray(nameBytes), 0, segment, offset, nameBytes.size.toLong())
-        offset += nameBytes.size.toLong()
-
-        CompoundProtocol.write(segment, offset, root)
+        CompoundProtocol.write(segment, contentOffset, root)
     }
 
 

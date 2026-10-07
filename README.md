@@ -78,7 +78,7 @@ repositories {
 }
 
 dependencies {
-    implementation("org.punkrecordz:totem:1.0.1")
+    implementation("org.punkrecordz:totem:1.0.2")
 }
 ```
 

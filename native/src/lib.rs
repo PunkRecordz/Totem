@@ -1,19 +1,24 @@
 /// Helper to decode a single VarInt element from the source byte slice (slow path fallback near buffer end).
-unsafe fn decode_single(source: &[u8], offset: &mut usize) -> u16 {
+/// Returns Some(value) on success, or None if the buffer is truncated mid-VarInt.
+#[inline(always)]
+unsafe fn decode_single(source: &[u8], offset: &mut usize) -> Option<u16> {
     let mut value = 0u32;
     let mut shift = 0;
 
-    loop {
+    while *offset < source.len() {
         let byte = unsafe { *source.get_unchecked(*offset) };
         *offset += 1;
         value |= ((byte & 0x7F) as u32) << shift;
         if (byte & 0x80) == 0 {
-            break;
+            return Some(value as u16);
         }
         shift += 7;
+        if shift >= 21 {
+            break;
+        }
     }
 
-    value as u16
+    None
 }
 
 /// Helper to decode a single VarInt element branchlessly from an already loaded 32-bit register.
@@ -38,14 +43,17 @@ fn decode_single_from_packed(packed: u32, offset: usize) -> (u16, usize) {
 }
 
 /// Decodes VarInt bytes from `src_ptr` into shorts at `dest_ptr`.
-/// Returns the number of bytes read from `src_ptr`.
+/// Returns the number of bytes read from `src_ptr` on success (>= 0),
+/// or a negative error code:
+/// -1: Truncated input (a VarInt was cut off before completing).
+/// -2: Incomplete output (buffer contained fewer VarInts than expected_size).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn decode_varint_shorts(
     src_ptr: *const u8,
     src_len: u64,
     dest_ptr: *mut u16,
     expected_size: u32,
-) -> u64 {
+) -> i64 {
     let source = unsafe { core::slice::from_raw_parts(src_ptr, src_len as usize) };
     let destination = unsafe { core::slice::from_raw_parts_mut(dest_ptr, expected_size as usize) };
 
@@ -81,12 +89,20 @@ pub unsafe extern "C" fn decode_varint_shorts(
 
     // clean up remaining elements near buffer end
     while source_offset < source.len() && destination_offset < destination.len() {
-        let value = unsafe { decode_single(source, &mut source_offset) };
-        unsafe { *destination.get_unchecked_mut(destination_offset) = value };
-        destination_offset += 1;
+        match unsafe { decode_single(source, &mut source_offset) } {
+            Some(value) => {
+                unsafe { *destination.get_unchecked_mut(destination_offset) = value };
+                destination_offset += 1;
+            }
+            None => return -1,
+        }
     }
 
-    source_offset as u64
+    if destination_offset < destination.len() {
+        return -2;
+    }
+
+    source_offset as i64
 }
 
 /// Helper to encode a single short element into VarInt bytes using a simple loop.
