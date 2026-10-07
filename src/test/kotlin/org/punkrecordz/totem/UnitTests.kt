@@ -7,6 +7,7 @@ import org.punkrecordz.totem.tag.Tags
 import java.lang.foreign.Arena
 import java.lang.foreign.ValueLayout
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotSame
 import kotlin.test.assertTrue
 
@@ -120,4 +121,83 @@ class UnitTests {
         assertTrue(nested != null)
         assertEquals(42, nested.getInt("intKey"))
     }
+
+    @Test
+    fun testNegativeByteArrayLengthThrowsException() {
+        // issue #1 repro: 11 bytes with byte array tag of length -7
+        val bytes = byteArrayOf(
+            0x0A, 0x00, 0x00,
+            0x07, 0x00, 0x00,
+            0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte(), 0xF9.toByte(),
+            0x00,
+        )
+
+        Arena.ofConfined().use { arena ->
+            val (_, root) = Totem.load(bytes, arena)
+
+            assertFailsWith<IllegalArgumentException> {
+                root.containsKey("x")
+            }
+        }
+    }
+
+    @Test
+    fun testNegativeIntArrayLengthThrowsException() {
+        // malformed compound with int array tag of length -1
+        val bytes = byteArrayOf(
+            0x0A, 0x00, 0x00,
+            0x0B, 0x00, 0x00,
+            0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte(),
+            0x00,
+        )
+
+        Arena.ofConfined().use { arena ->
+            val (_, root) = Totem.load(bytes, arena)
+
+            assertFailsWith<IllegalArgumentException> {
+                root.containsKey("x")
+            }
+        }
+    }
+
+    @Test
+    fun testNegativeLongArrayLengthThrowsException() {
+        // malformed compound with long array tag of length -1
+        val bytes = byteArrayOf(
+            0x0A, 0x00, 0x00,
+            0x0C, 0x00, 0x00,
+            0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte(),
+            0x00,
+        )
+
+        Arena.ofConfined().use { arena ->
+            val (_, root) = Totem.load(bytes, arena)
+
+            assertFailsWith<IllegalArgumentException> {
+                root.containsKey("x")
+            }
+        }
+    }
+
+    @Test
+    fun testNegativeListTagCountThrowsException() {
+        // malformed compound with list tag of count -1
+        val bytes = byteArrayOf(
+            0x0A, 0x00, 0x00,
+            0x09, 0x00, 0x00,
+            0x01,
+            0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte(),
+            0x00,
+        )
+
+        Arena.ofConfined().use { arena ->
+            val (_, root) = Totem.load(bytes, arena)
+
+            assertFailsWith<IllegalArgumentException> {
+                root.containsKey("x")
+            }
+        }
+    }
+
 }
+
