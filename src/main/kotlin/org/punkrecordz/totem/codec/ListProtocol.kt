@@ -17,9 +17,14 @@ object ListProtocol : TagProtocol<ListTag<Tag>> {
         val typeId = segment.get(MemoryLayouts.BYTE, offset).toInt()
         val count = segment.get(MemoryLayouts.INT, offset + MemoryLayouts.BYTE.byteSize())
 
+        // validate element count
+        if (count < 0) {
+            throw IllegalArgumentException("ListTag element count must be non-negative, but was $count at offset $offset")
+        }
+
         val headerSize = MemoryLayouts.BYTE.byteSize() + MemoryLayouts.INT.byteSize()
 
-        if (count <= 0) {
+        if (count == 0) {
             return headerSize
         }
 
@@ -27,7 +32,14 @@ object ListProtocol : TagProtocol<ListTag<Tag>> {
         var currentOffset = offset + headerSize
 
         repeat(count) {
-            currentOffset += protocol.calculateSize(segment, currentOffset)
+            val elementSize = protocol.calculateSize(segment, currentOffset)
+
+            // ensure offset strictly advances
+            if (elementSize <= 0) {
+                throw IllegalStateException("Calculated non-positive element size: $elementSize for list element type ID $typeId at offset $currentOffset")
+            }
+
+            currentOffset += elementSize
         }
 
         return currentOffset - offset

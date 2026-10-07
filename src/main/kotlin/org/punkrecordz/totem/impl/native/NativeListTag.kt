@@ -24,7 +24,14 @@ value class NativeListTag<T : Tag>(
     override val size: Int
         get() {
             val byteSize = MemoryLayouts.BYTE.byteSize()
-            return segment.get(MemoryLayouts.INT, byteSize)
+            val count = segment.get(MemoryLayouts.INT, byteSize)
+
+            // validate element count
+            if (count < 0) {
+                throw IllegalStateException("NativeListTag segment contains negative element count: $count")
+            }
+
+            return count
         }
 
     override fun isEmpty(): Boolean = size == 0

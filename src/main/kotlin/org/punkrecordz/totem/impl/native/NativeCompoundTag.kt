@@ -115,7 +115,14 @@ value class NativeCompoundTag(
             block(EntryInfo(name, typeId, valueOffset))
 
             val protocol = ProtocolRegistry.getOrThrow(typeId)
-            offset = valueOffset + protocol.calculateSize(segment, valueOffset)
+            val entrySize = protocol.calculateSize(segment, valueOffset)
+
+            // ensure offset strictly advances to prevent infinite traversal loops
+            if (entrySize <= 0) {
+                throw IllegalStateException("Calculated non-positive entry size: $entrySize for tag ID $typeId at offset $valueOffset")
+            }
+
+            offset = valueOffset + entrySize
         }
     }
 
@@ -163,7 +170,14 @@ value class NativeCompoundTag(
 
                 val valueOffset = offset + shortSize + nameLength
                 val protocol = ProtocolRegistry.getOrThrow(typeId)
-                offset = valueOffset + protocol.calculateSize(segment, valueOffset)
+                val entrySize = protocol.calculateSize(segment, valueOffset)
+
+                // ensure offset strictly advances to prevent infinite traversal loops
+                if (entrySize <= 0) {
+                    throw IllegalStateException("Calculated non-positive entry size: $entrySize for tag ID $typeId at offset $valueOffset")
+                }
+
+                offset = valueOffset + entrySize
             }
 
             return null
@@ -203,7 +217,14 @@ value class NativeCompoundTag(
 
             val valueOffset = offset + shortSize + nameLength
             val protocol = ProtocolRegistry.getOrThrow(typeId)
-            offset = valueOffset + protocol.calculateSize(segment, valueOffset)
+            val entrySize = protocol.calculateSize(segment, valueOffset)
+
+            // ensure offset strictly advances to prevent infinite traversal loops
+            if (entrySize <= 0) {
+                throw IllegalStateException("Calculated non-positive entry size: $entrySize for tag ID $typeId at offset $valueOffset")
+            }
+
+            offset = valueOffset + entrySize
         }
 
         return null
