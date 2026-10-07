@@ -30,7 +30,14 @@ object CompoundProtocol : TagProtocol<CompoundTag> {
             currentOffset += shortSize + nameLength
 
             val protocol = ProtocolRegistry.getOrThrow(typeId)
-            currentOffset += protocol.calculateSize(segment, currentOffset)
+            val entrySize = protocol.calculateSize(segment, currentOffset)
+
+            // ensure offset strictly advances to prevent infinite traversal loops
+            if (entrySize <= 0) {
+                throw IllegalStateException("Calculated non-positive entry size: $entrySize for tag ID $typeId at offset $currentOffset")
+            }
+
+            currentOffset += entrySize
         }
 
         return currentOffset - offset
