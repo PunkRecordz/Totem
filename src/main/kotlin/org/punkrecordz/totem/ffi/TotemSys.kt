@@ -123,6 +123,20 @@ object TotemSys {
         nativeLinker.downcallHandle(symbol, fillShortsDescriptor, criticalOption)
     }
 
+    private val replaceVarIntBytesDescriptor = FunctionDescriptor.of(
+        ValueLayout.JAVA_LONG,
+        ValueLayout.ADDRESS,
+        ValueLayout.JAVA_LONG,
+        ValueLayout.JAVA_SHORT,
+        ValueLayout.JAVA_SHORT,
+    )
+
+    private val replaceVarIntBytesMethodHandle by lazy {
+        val symbol = nativeLibrary.find("replace_varint_bytes_in_place")
+            .orElseThrow { UnsatisfiedLinkError("Symbol replace_varint_bytes_in_place not found in totem-sys native library") }
+        nativeLinker.downcallHandle(symbol, replaceVarIntBytesDescriptor, criticalOption)
+    }
+
     fun decodeVarIntShorts(
         sourceSlice: MemorySegment,
         destinationSlice: MemorySegment,
@@ -225,6 +239,20 @@ object TotemSys {
             length,
             value,
         )
+    }
+
+    fun replaceVarIntBytesInPlace(
+        dataSlice: MemorySegment,
+        length: Long,
+        target: Short,
+        replacement: Short,
+    ): Long {
+        return replaceVarIntBytesMethodHandle.invokeExact(
+            dataSlice,
+            length,
+            target,
+            replacement,
+        ) as Long
     }
 
     private fun getPlatformName(): String {

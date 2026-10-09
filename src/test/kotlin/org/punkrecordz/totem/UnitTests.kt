@@ -7,6 +7,8 @@ import org.punkrecordz.totem.impl.native.NativeShortView
 import org.punkrecordz.totem.io.MemoryLayouts
 import org.punkrecordz.totem.tag.TagType
 import org.punkrecordz.totem.tag.Tags
+import org.punkrecordz.totem.view.replaceVarIntInPlace
+import org.punkrecordz.totem.view.toVarIntByteArray
 import org.punkrecordz.totem.view.toVarIntShortArray
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -403,6 +405,49 @@ class UnitTests {
         }
     }
 
+    @Test
+    fun testReplaceVarIntInPlace() {
+        Arena.ofConfined().use { arena ->
+            val elementCount = 200_000
+            val originalShorts = NativeShortView.of(elementCount, arena)
+
+            for (index in 0 until elementCount) {
+                val value = when {
+                    index % 1000 == 0 -> 256.toShort() // multi-byte VarInt (should remain untouched)
+                    index % 2 == 0 -> 0.toShort()      // air -> to be replaced by 42
+                    else -> 5.toShort()                // other block
+                }
+                originalShorts[index] = value
+            }
+
+            val byteArrayTag = originalShorts.toVarIntByteArray(arena)
+
+            val replacedSuccessfully = byteArrayTag.replaceVarIntInPlace(
+                0.toShort(),
+                42.toShort(),
+            )
+            assertTrue(replacedSuccessfully)
+
+            // decode to verify all substitutions and preserved elements
+            val decodedShorts = byteArrayTag.toVarIntShortArray(elementCount, arena)
+
+            for (index in 0 until elementCount) {
+                val expectedValue = when {
+                    index % 1000 == 0 -> 256.toShort()
+                    index % 2 == 0 -> 42.toShort()
+                    else -> 5.toShort()
+                }
+
+                assertEquals(
+                    expectedValue,
+                    decodedShorts[index],
+                    "Mismatch at index $index",
+                )
+            }
+        }
+    }
+
 }
+
 
 

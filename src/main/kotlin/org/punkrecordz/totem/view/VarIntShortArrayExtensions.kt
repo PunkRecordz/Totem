@@ -262,3 +262,104 @@ fun ShortView.toVarIntByteArray(
 
     return NativeByteArrayTag(targetSegment)
 }
+
+/**
+ * Replaces all occurrences of [target] with [replacement] directly in this [ByteView] VarInt stream in-place.
+ *
+ * Strategy:
+ * When both [target] and [replacement] are single-byte VarInts (< 128), their encoded byte lengths
+ * are identically 1 byte. This allows instantaneous, zero-allocation in-place AVX2 transformation
+ * without allocating any intermediate ShortArray or NativeShortView buffers.
+ * For large buffers exceeding [PARALLEL_THRESHOLD_ELEMENTS], partitions the buffer along VarInt boundaries
+ * and executes parallel AVX2 blend instructions across available hardware threads.
+ *
+ * Trade-offs:
+ * If either [target] or [replacement] requires multi-byte VarInt encoding (>= 128), in-place
+ * replacement cannot be performed without resizing and returns false, signaling the caller to use
+ * the standard decode/encode pipeline.
+ *
+ * Performance targets:
+ * Sub-5ms batch replacement directly on gigabyte-sized off-heap byte streams with zero memory allocation.
+ *
+ * @param target The short block state value to find and replace.
+ * @param replacement The short block state value to substitute.
+ * @return True if in-place replacement was performed, false if the values require multi-byte resizing.
+ */
+fun ByteView.replaceVarIntInPlace(
+    target: Short,
+    replacement: Short,
+): Boolean {
+    if (target.toInt() !in 0..127 || replacement.toInt() !in 0..127) {
+        return false
+    }
+
+    if (this !is NativeByteArrayTag) {
+        throw IllegalArgumentException("Only native off-heap tags can be modified in-place using native VarInt routines.")
+    }
+
+    val sourceSlice = this.segment.asSlice(MemoryLayouts.INT.byteSize())
+    val totalBytes = sourceSlice.byteSize()
+
+    if (totalBytes == 0L) {
+        return true
+    }
+
+    // sequential fast path for smaller buffers
+    if (totalBytes < PARALLEL_THRESHOLD_ELEMENTS) {
+        TotemSys.replaceVarIntBytesInPlace(
+            sourceSlice,
+            totalBytes,
+            target,
+            replacement,
+        )
+
+        return true
+    }
+
+    val availableCores = Runtime.getRuntime().availableProcessors().coerceIn(1, 16)
+    val targetChunkBytes = totalBytes / availableCores
+
+    // partition byte buffer along VarInt terminal boundaries (byte & 0x80 == 0)
+    val byteBoundaries = LongArray(availableCores + 1)
+    byteBoundaries[0] = 0L
+    byteBoundaries[availableCores] = totalBytes
+
+    for (index in 1 until availableCores) {
+        var boundary = minOf(totalBytes, index.toLong() * targetChunkBytes)
+        while (boundary < totalBytes && (sourceSlice.get(ValueLayout.JAVA_BYTE, boundary - 1L).toInt() and 0x80) != 0) {
+            boundary++
+        }
+
+        byteBoundaries[index] = boundary
+    }
+
+    val rawSourceAddress = sourceSlice.address()
+
+    // transform partitions concurrently in-place using AVX2 SIMD
+    val tasks = (0 until availableCores).map { index ->
+        val startByte = byteBoundaries[index]
+        val byteLength = byteBoundaries[index + 1] - startByte
+
+        Callable {
+            if (byteLength > 0L) {
+                val chunkSlice = MemorySegment.ofAddress(rawSourceAddress + startByte)
+                    .reinterpret(byteLength)
+
+                TotemSys.replaceVarIntBytesInPlace(
+                    chunkSlice,
+                    byteLength,
+                    target,
+                    replacement,
+                )
+            }
+        }
+    }
+
+    val futures = TotemThreadPool.executor.invokeAll(tasks)
+    for (future in futures) {
+        future.get()
+    }
+
+    return true
+}
+

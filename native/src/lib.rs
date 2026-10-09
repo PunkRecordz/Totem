@@ -719,6 +719,120 @@ unsafe fn replace_shorts_fallback(slice: &mut [i16], target: i16, replacement: i
     }
 }
 
+/// Replaces occurrences of `target` with `replacement` directly in a VarInt byte stream.
+/// When target < 128 and replacement < 128, the VarInt encoding lengths match (1 byte each),
+/// enabling instantaneous, zero-allocation in-place AVX2 transformation.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn replace_varint_bytes_in_place(
+    data: *mut u8,
+    len: u64,
+    target: u16,
+    replacement: u16,
+) -> i64 {
+    if data.is_null() || len == 0 {
+        return 0;
+    }
+
+    if target >= 128 || replacement >= 128 {
+        return -1;
+    }
+
+    let slice = core::slice::from_raw_parts_mut(data, len as usize);
+
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("avx2") {
+        replace_varint_bytes_avx2(slice, target as u8, replacement as u8);
+        return len as i64;
+    }
+
+    replace_varint_bytes_fallback(slice, target as u8, replacement as u8);
+    len as i64
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn replace_varint_bytes_avx2(slice: &mut [u8], target: u8, replacement: u8) {
+    use core::arch::x86_64::*;
+
+    let target_vec = _mm256_set1_epi8(target as i8);
+    let repl_vec = _mm256_set1_epi8(replacement as i8);
+    let len = slice.len();
+    let mut offset = 0;
+
+    while offset + 32 <= len {
+        let ptr = slice.as_mut_ptr().add(offset) as *mut __m256i;
+        let chunk = _mm256_loadu_si256(ptr);
+        let mask = _mm256_movemask_epi8(chunk);
+
+        if mask == 0 {
+            // fast path: all 32 bytes are independent 1-byte VarInts (MSB = 0)
+            let eq_mask = _mm256_cmpeq_epi8(chunk, target_vec);
+            let blended = _mm256_blendv_epi8(chunk, repl_vec, eq_mask);
+            _mm256_storeu_si256(ptr, blended);
+            offset += 32;
+        } else {
+            let prefix_ones = mask.trailing_zeros() as usize;
+            if prefix_ones > 0 {
+                for i in 0..prefix_ones {
+                    let b = slice.get_unchecked_mut(offset + i);
+                    if *b == target {
+                        *b = replacement;
+                    }
+                }
+                offset += prefix_ones;
+            }
+
+            // skip continuation bytes of multi-byte VarInt
+            while offset < len && (*slice.get_unchecked(offset) & 0x80) != 0 {
+                offset += 1;
+            }
+            // skip terminal byte of multi-byte VarInt
+            if offset < len {
+                offset += 1;
+            }
+        }
+    }
+
+    // scalar tail processing
+    while offset < len {
+        let b = *slice.get_unchecked(offset);
+        if (b & 0x80) == 0 {
+            if b == target {
+                *slice.get_unchecked_mut(offset) = replacement;
+            }
+            offset += 1;
+        } else {
+            while offset < len && (*slice.get_unchecked(offset) & 0x80) != 0 {
+                offset += 1;
+            }
+            if offset < len {
+                offset += 1;
+            }
+        }
+    }
+}
+
+unsafe fn replace_varint_bytes_fallback(slice: &mut [u8], target: u8, replacement: u8) {
+    let len = slice.len();
+    let mut offset = 0;
+    while offset < len {
+        let b = *slice.get_unchecked(offset);
+        if (b & 0x80) == 0 {
+            if b == target {
+                *slice.get_unchecked_mut(offset) = replacement;
+            }
+            offset += 1;
+        } else {
+            while offset < len && (*slice.get_unchecked(offset) & 0x80) != 0 {
+                offset += 1;
+            }
+            if offset < len {
+                offset += 1;
+            }
+        }
+    }
+}
+
 /// Fills all elements in `data` with `value` in-place using AVX2 SIMD.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fill_shorts(
@@ -865,5 +979,48 @@ mod tests {
             fill_shorts(sample.as_mut_ptr(), sample.len() as u64, 99);
         }
         assert_eq!(sample, vec![99i16; 35]);
+    }
+
+    #[test]
+    fn test_replace_varint_bytes_in_place() {
+        // Mix of 1-byte VarInts (including 0) and multi-byte VarInts (e.g. 128 = [0x80, 0x01], 256 = [0x80, 0x02])
+        let mut sample = vec![
+            0x00,               // 0 -> should become 42
+            0x01,               // 1 -> should stay 1
+            0x00,               // 0 -> should become 42
+            0x80, 0x01,         // 128 (multi-byte) -> should NOT be touched!
+            0x00,               // 0 -> should become 42
+            0x05,               // 5 -> should stay 5
+            0x80, 0x02,         // 256 (multi-byte) -> should NOT be touched!
+            0x00,               // 0 -> should become 42
+        ];
+
+        // Pad with 32 zeros to exercise the 32-byte AVX2 fast path
+        sample.extend(vec![0x00; 32]);
+        // Add another multi-byte VarInt
+        sample.extend(vec![0x80, 0x80, 0x01]); // 16384
+        sample.extend(vec![0x00, 0x02, 0x00]);
+
+        let mut expected = sample.clone();
+        // Compute expected by replacing all standalone 0s with 42
+        expected[0] = 42;
+        expected[2] = 42;
+        // expected[3..5] is [0x80, 0x01] (128) - untouched!
+        expected[5] = 42;
+        // expected[7..9] is [0x80, 0x02] (256) - untouched!
+        expected[9] = 42;
+        for i in 10..42 {
+            expected[i] = 42;
+        }
+        // expected[42..45] is [0x80, 0x80, 0x01] (16384) - untouched!
+        expected[45] = 42;
+        expected[47] = 42;
+
+        let result = unsafe {
+            replace_varint_bytes_in_place(sample.as_mut_ptr(), sample.len() as u64, 0, 42)
+        };
+
+        assert_eq!(result, sample.len() as i64);
+        assert_eq!(sample, expected);
     }
 }
