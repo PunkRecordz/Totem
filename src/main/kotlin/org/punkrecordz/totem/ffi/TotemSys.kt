@@ -10,6 +10,17 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 
+/**
+ * Foreign Function & Memory (FFM) bridge for the high-performance native `totem-sys` companion library.
+ *
+ * Strategy:
+ * Uses Project Panama's downcall handles equipped with [Linker.Option.critical] (`allowHeapAccess = false`)
+ * to eliminate safepoints, thread-state switches, and FFI transition overhead for intensive batch
+ * encoding/decoding of VarInt data directly on raw [MemorySegment] instances.
+ *
+ * Performance targets:
+ * Sub-millisecond execution for millions of block states through SIMD/SWAR parallelized native routines.
+ */
 object TotemSys {
 
     private val nativeLinker = Linker.nativeLinker()
@@ -33,16 +44,30 @@ object TotemSys {
         ValueLayout.ADDRESS,
     )
 
+    private val sizeDescriptor = FunctionDescriptor.of(
+        ValueLayout.JAVA_LONG,
+        ValueLayout.ADDRESS,
+        ValueLayout.JAVA_LONG,
+    )
+
+    private val criticalOption = Linker.Option.critical(false)
+
     private val decodeMethodHandle by lazy {
         val symbol = nativeLibrary.find("decode_varint_shorts")
             .orElseThrow { UnsatisfiedLinkError("Symbol decode_varint_shorts not found in totem-sys native library") }
-        nativeLinker.downcallHandle(symbol, decodeDescriptor)
+        nativeLinker.downcallHandle(symbol, decodeDescriptor, criticalOption)
     }
 
     private val encodeMethodHandle by lazy {
         val symbol = nativeLibrary.find("encode_shorts_varint")
             .orElseThrow { UnsatisfiedLinkError("Symbol encode_shorts_varint not found in totem-sys native library") }
-        nativeLinker.downcallHandle(symbol, encodeDescriptor)
+        nativeLinker.downcallHandle(symbol, encodeDescriptor, criticalOption)
+    }
+
+    private val sizeMethodHandle by lazy {
+        val symbol = nativeLibrary.find("varint_encoded_size")
+            .orElseThrow { UnsatisfiedLinkError("Symbol varint_encoded_size not found in totem-sys native library") }
+        nativeLinker.downcallHandle(symbol, sizeDescriptor, criticalOption)
     }
 
     fun decodeVarIntShorts(
@@ -50,7 +75,7 @@ object TotemSys {
         destinationSlice: MemorySegment,
         expectedSize: Int,
     ): Long {
-        val result = decodeMethodHandle.invoke(
+        val result = decodeMethodHandle.invokeExact(
             sourceSlice,
             sourceSlice.byteSize(),
             destinationSlice,
@@ -79,10 +104,20 @@ object TotemSys {
         sourceLength: Long,
         destinationSlice: MemorySegment,
     ): Long {
-        return encodeMethodHandle.invoke(
+        return encodeMethodHandle.invokeExact(
             sourceSlice,
             sourceLength,
             destinationSlice,
+        ) as Long
+    }
+
+    fun calculateVarIntEncodedSize(
+        sourceSlice: MemorySegment,
+        sourceLength: Long,
+    ): Long {
+        return sizeMethodHandle.invokeExact(
+            sourceSlice,
+            sourceLength,
         ) as Long
     }
 

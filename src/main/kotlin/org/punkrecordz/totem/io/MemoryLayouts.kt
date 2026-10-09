@@ -31,7 +31,8 @@ object MemoryLayouts {
         val length = segment.get(SHORT, offset).toInt() and 0xFFFF
         if (length == 0) return ""
 
-        val bytes = segment.asSlice(offset + 2L, length.toLong()).toArray(BYTE)
+        val bytes = ByteArray(length)
+        MemorySegment.copy(segment, BYTE, offset + 2L, bytes, 0, length)
         return decodeString(bytes)
     }
 
@@ -157,16 +158,29 @@ object MemoryLayouts {
         if (isAsciiWithoutNull(value)) {
             segment.set(SHORT, offset, characterLength.toShort())
 
-            for (characterIndex in 0 until characterLength) {
-                segment.set(BYTE, offset + shortSize + characterIndex, value[characterIndex].code.toByte())
-            }
+            val bytes = value.toByteArray(StandardCharsets.ISO_8859_1)
+            MemorySegment.copy(
+                bytes,
+                0,
+                segment,
+                BYTE,
+                offset + shortSize,
+                characterLength,
+            )
 
             return shortSize + characterLength
         }
 
         val encodedBytes = encodeString(value)
         segment.set(SHORT, offset, encodedBytes.size.toShort())
-        MemorySegment.copy(MemorySegment.ofArray(encodedBytes), 0L, segment, offset + shortSize, encodedBytes.size.toLong())
+        MemorySegment.copy(
+            encodedBytes,
+            0,
+            segment,
+            BYTE,
+            offset + shortSize,
+            encodedBytes.size,
+        )
 
         return shortSize + encodedBytes.size
     }

@@ -7,13 +7,17 @@ import org.punkrecordz.totem.io.MemoryLayouts
 import org.punkrecordz.totem.io.allocateUninitialized
 import org.punkrecordz.totem.tag.ByteArrayTag
 import java.lang.foreign.Arena
-import java.lang.foreign.MemorySegment
 
 /**
- * Decodes the VarInt compressed byte data inside this [ByteView] into a zero-allocation off-heap [ShortView].
+ * Decodes the VarInt compressed byte data inside this [ByteView] into a zero-allocation off-heap [NativeShortView].
  *
- * To avoid any JVM heap allocations and maintain optimal performance, the decoding loop is
- * directly delegated to the native totem-sys Rust library.
+ * Strategy:
+ * Directly delegates to the native `totem-sys` library with critical Panama downcalls and AVX2 SIMD acceleration.
+ * Returning [NativeShortView] directly rather than interface [ShortView] avoids heap boxing of the value class,
+ * enabling the Kotlin and HotSpot compilers to erase the abstraction into raw off-heap pointers.
+ *
+ * Performance targets:
+ * Multi-gigabyte per second VarInt decoding throughput with zero JVM heap garbage collection.
  *
  * @param expectedSize The number of Short elements expected in the decoded view.
  * @param arena The FFM Arena to allocate the off-heap MemorySegment for the resulting view.
@@ -21,7 +25,7 @@ import java.lang.foreign.MemorySegment
 fun ByteView.toVarIntShortArray(
     expectedSize: Int,
     arena: Arena,
-): ShortView {
+): NativeShortView {
     if (this !is NativeByteArrayTag) {
         throw IllegalArgumentException("Only native off-heap tags can be decoded using native VarInt translation.")
     }
@@ -31,8 +35,8 @@ fun ByteView.toVarIntShortArray(
         arena,
     )
 
-    val sourceSlice = this.segment.asSlice(4L)
-    val destinationSlice = view.segment.asSlice(4L)
+    val sourceSlice = this.segment.asSlice(MemoryLayouts.INT.byteSize())
+    val destinationSlice = view.segment.asSlice(MemoryLayouts.INT.byteSize())
 
     TotemSys.decodeVarIntShorts(
         sourceSlice,
@@ -46,13 +50,13 @@ fun ByteView.toVarIntShortArray(
 /**
  * Encodes this [ShortView] into a VarInt compressed [ByteArrayTag] off-heap.
  *
- * Since the size of the VarInt compressed output depends on the actual block IDs, it
- * cannot be known before encoding. To prevent off-heap memory leaks or wastage in
- * long-lived arenas, we encode the data in a temporary confined arena of maximum possible
- * size. Once encoding is done, we copy only the exact payload to the destination [arena]
- * and immediately free the temporary workspace.
+ * Strategy:
+ * Pre-calculates the exact required byte size in a single pass using vectorized AVX2 SIMD in native Rust.
+ * This completely eliminates the need for oversized intermediate scratch buffers, secondary reallocation,
+ * and massive payload memory copying across the bus.
  *
- * This ensures single-pass encoding speed with zero long-term memory overhead.
+ * Performance targets:
+ * Zero-copy, single-allocation encoding directly into the target [arena].
  *
  * @param arena The FFM Arena to allocate the off-heap MemorySegment for the resulting ByteArrayTag.
  */
@@ -63,26 +67,22 @@ fun ShortView.toVarIntByteArray(
         throw IllegalArgumentException("Only NativeShortView is supported for native VarInt encoding.")
     }
 
-    val maxPossibleSize = size.toLong() * 3L + MemoryLayouts.INT.byteSize() + 8L
+    val sourceSlice = this.segment.asSlice(MemoryLayouts.INT.byteSize())
+    val elementCount = this.size.toLong()
 
-    return Arena.ofConfined().use { tempArena ->
-        val tempSegment = tempArena.allocateUninitialized(maxPossibleSize)
-        val sourceSlice = this.segment.asSlice(4L)
-        val destinationSlice = tempSegment.asSlice(4L)
+    // calculate exact encoded size via fast SIMD to avoid temporary buffers and memory copying
+    val payloadSize = TotemSys.calculateVarIntEncodedSize(sourceSlice, elementCount)
+    val totalSize = payloadSize + MemoryLayouts.INT.byteSize()
 
-        val payloadSize = TotemSys.encodeShortsVarInt(
-            sourceSlice,
-            this.size.toLong(),
-            destinationSlice,
-        )
+    val targetSegment = arena.allocateUninitialized(totalSize)
+    targetSegment.set(MemoryLayouts.INT, 0L, payloadSize.toInt())
 
-        tempSegment.set(MemoryLayouts.INT, 0L, payloadSize.toInt())
+    val destinationSlice = targetSegment.asSlice(MemoryLayouts.INT.byteSize())
+    TotemSys.encodeShortsVarInt(
+        sourceSlice,
+        elementCount,
+        destinationSlice,
+    )
 
-        val exactSize = payloadSize + MemoryLayouts.INT.byteSize()
-        val finalSegment = arena.allocateUninitialized(exactSize)
-
-        MemorySegment.copy(tempSegment, 0L, finalSegment, 0L, exactSize)
-
-        NativeByteArrayTag(finalSegment)
-    }
+    return NativeByteArrayTag(targetSegment)
 }

@@ -8,8 +8,19 @@ import org.punkrecordz.totem.tag.TagType
 import org.punkrecordz.totem.tag.contract.Tag
 import org.punkrecordz.totem.view.NativeView
 import java.lang.foreign.MemorySegment
-import java.util.*
+import java.util.AbstractMap
 
+/**
+ * High-performance, zero-allocation off-heap view over an NBT Compound tag.
+ *
+ * Strategy:
+ * Maps directly over a raw [MemorySegment] without creating intermediate AST nodes on the JVM heap.
+ * Tag lookups and containment tests use packed primitive 64-bit integer addresses to eliminate heap
+ * allocation on every query.
+ *
+ * Performance targets:
+ * Zero heap allocations for [get], [containsKey], [isEmpty], and [size] queries.
+ */
 @JvmInline
 value class NativeCompoundTag(
     override val segment: MemorySegment,
@@ -18,7 +29,29 @@ value class NativeCompoundTag(
     override val size: Int
         get() {
             var count = 0
-            forEachEntry { count++ }
+            var offset = 0L
+            val byteSize = MemoryLayouts.BYTE.byteSize()
+            val shortSize = MemoryLayouts.SHORT.byteSize()
+
+            while (true) {
+                val typeId = segment.get(MemoryLayouts.BYTE, offset).toInt()
+                if (typeId == TagType.END.id) break
+
+                offset += byteSize
+                val nameLength = segment.get(MemoryLayouts.SHORT, offset).toInt() and 0xFFFF
+                val valueOffset = offset + shortSize + nameLength
+                count++
+
+                val protocol = ProtocolRegistry.getOrThrow(typeId)
+                val entrySize = protocol.calculateSize(segment, valueOffset)
+
+                if (entrySize <= 0) {
+                    throw IllegalStateException("Calculated non-positive entry size: $entrySize for tag ID $typeId at offset $valueOffset")
+                }
+
+                offset = valueOffset + entrySize
+            }
+
             return count
         }
 
@@ -26,7 +59,7 @@ value class NativeCompoundTag(
         return segment.get(MemoryLayouts.BYTE, 0L).toInt() == TagType.END.id
     }
 
-    override fun containsKey(key: String): Boolean = findEntry(key) != null
+    override fun containsKey(key: String): Boolean = findEntryPacked(key) >= 0L
 
     override fun containsValue(value: Tag): Boolean {
         var found = false
@@ -41,10 +74,14 @@ value class NativeCompoundTag(
     }
 
     override fun get(key: String): Tag? {
-        val entry = findEntry(key) ?: return null
-        val protocol = ProtocolRegistry.getOrThrow(entry.typeId)
+        val packed = findEntryPacked(key)
+        if (packed < 0L) return null
 
-        return protocol.read(segment, entry.valueOffset)
+        val typeId = (packed ushr 48).toInt()
+        val valueOffset = packed and 0x0000FFFFFFFFFFFFL
+        val protocol = ProtocolRegistry.getOrThrow(typeId)
+
+        return protocol.read(segment, valueOffset)
     }
 
     override val entries: MutableSet<MutableMap.MutableEntry<String, Tag>>
@@ -126,10 +163,17 @@ value class NativeCompoundTag(
         }
     }
 
-    private fun findEntry(key: String): EntryInfo? {
+    /**
+     * Finds an entry by key and returns a packed 64-bit Long containing:
+     * - bits 48..63: typeId
+     * - bits 0..47: valueOffset
+     * Returns -1L if not found.
+     * This avoids any object allocation on the critical query path.
+     */
+    private fun findEntryPacked(key: String): Long {
         val characterLength = key.length
         if (characterLength > 65535) {
-            return null
+            return -1L
         }
 
         val isPureAscii = MemoryLayouts.isAsciiWithoutNull(key)
@@ -137,7 +181,7 @@ value class NativeCompoundTag(
             try {
                 MemoryLayouts.encodeString(key)
             } catch (_: IllegalArgumentException) {
-                return null
+                return -1L
             }
         } else {
             null
@@ -172,11 +216,7 @@ value class NativeCompoundTag(
                 }
 
                 if (matches) {
-                    return EntryInfo(
-                        name = key,
-                        typeId = typeId,
-                        valueOffset = valueOffset,
-                    )
+                    return (typeId.toLong() shl 48) or (valueOffset and 0x0000FFFFFFFFFFFFL)
                 }
             }
 
@@ -190,7 +230,7 @@ value class NativeCompoundTag(
             offset = valueOffset + entrySize
         }
 
-        return null
+        return -1L
     }
 
     private data class EntryInfo(
@@ -200,4 +240,3 @@ value class NativeCompoundTag(
     )
 
 }
-

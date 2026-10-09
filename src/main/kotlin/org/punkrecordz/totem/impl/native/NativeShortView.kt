@@ -9,6 +9,21 @@ import java.lang.foreign.MemorySegment
 import java.lang.foreign.ValueLayout
 import java.nio.ByteOrder
 
+/**
+ * Zero-allocation off-heap view over a continuous sequence of 16-bit short integers.
+ *
+ * Strategy:
+ * Uses a Kotlin [JvmInline] value class wrapping a raw [MemorySegment]. At runtime, HotSpot erases
+ * this wrapper to a pure 64-bit reference, avoiding JVM object headers, garbage collection pressure,
+ * and heap indirection.
+ *
+ * Trade-offs:
+ * Off-heap segments must be bound to a valid [Arena] lifecycle. Accessing memory after arena closure
+ * causes compile-enforced or runtime safe illegal state failures rather than silent memory corruption.
+ *
+ * Performance targets:
+ * Direct memory instructions on aligned 2-byte short values matching native memory endianness.
+ */
 @JvmInline
 value class NativeShortView(
     override val segment: MemorySegment,
@@ -40,6 +55,7 @@ value class NativeShortView(
     }
 
     companion object {
+
         val NATIVE_SHORT: ValueLayout.OfShort = ValueLayout.JAVA_SHORT_UNALIGNED.withOrder(ByteOrder.nativeOrder())
 
         fun of(array: ShortArray, arena: Arena): NativeShortView {
@@ -66,6 +82,7 @@ value class NativeShortView(
 
             return NativeShortView(segment)
         }
+
     }
 
 }
