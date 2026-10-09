@@ -6,6 +6,7 @@ import org.openjdk.jmh.runner.Runner
 import org.openjdk.jmh.runner.options.OptionsBuilder
 import org.punkrecordz.totem.io.compression.CompressionType
 import org.punkrecordz.totem.tag.Tags
+import org.punkrecordz.totem.view.replaceVarIntInPlace
 import org.punkrecordz.totem.view.toVarIntByteArray
 import org.punkrecordz.totem.view.toVarIntShortArray
 import java.lang.foreign.Arena
@@ -100,6 +101,26 @@ open class JmhBenchmarks {
             }
 
             Totem.save(name, newRoot, tempTotemPath, CompressionType.GZIP)
+            return tempTotemPath.toFile().length()
+        }
+    }
+
+    @Benchmark
+    fun benchmarkTotemInPlacePipeline(): Long {
+        Arena.ofConfined().use { arena ->
+            val (name, root) = Totem.load(schematicPath, arena)
+
+            val schematic = if (root.containsKey("Width")) root else root.getCompound("Schematic")!!
+
+            val dataTag = if (schematic.containsKey("BlockData")) {
+                schematic.getByteArray("BlockData")!!
+            } else {
+                schematic.getCompound("Blocks")!!.getByteArray("Data")!!
+            }
+
+            dataTag.replaceVarIntInPlace(0.toShort(), 1.toShort())
+
+            Totem.save(name, root, tempTotemPath, CompressionType.GZIP)
             return tempTotemPath.toFile().length()
         }
     }
