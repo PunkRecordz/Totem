@@ -8,6 +8,7 @@ import org.punkrecordz.totem.impl.native.NativeShortView
 import org.punkrecordz.totem.io.MemoryLayouts
 import org.punkrecordz.totem.view.ArrayView
 import org.punkrecordz.totem.view.contentEquals
+import org.punkrecordz.totem.view.replaceVarIntInPlace
 import org.punkrecordz.totem.view.toVarIntByteArray
 import org.punkrecordz.totem.view.toVarIntShortArray
 import java.lang.foreign.Arena
@@ -176,4 +177,133 @@ class PropertyTests {
         return bytes
     }
 
+    @Test
+    fun testReplaceVarIntInPlaceFuzzing() {
+        val random = Random(1337)
+
+        Arena.ofConfined().use { arena ->
+            repeat(2000) { iteration ->
+                val size = random.nextInt(1000) + 1
+                val originalArray = ShortArray(size) {
+                    when (random.nextInt(4)) {
+                        0 -> 0.toShort()
+                        1 -> (random.nextInt(128)).toShort()
+                        2 -> (128 + random.nextInt(16256)).toShort() // 2-byte VarInt
+                        else -> (16384 + random.nextInt(49152)).toShort() // 3-byte VarInt
+                    }
+                }
+
+                val target = random.nextInt(128).toShort()
+                val replacement = random.nextInt(128).toShort()
+
+                val expectedArray = ShortArray(size) { index ->
+                    if (originalArray[index] == target) replacement else originalArray[index]
+                }
+
+                val shortView = NativeShortView.of(originalArray, arena)
+                val byteArrayTag = shortView.toVarIntByteArray(arena)
+
+                val modified = byteArrayTag.replaceVarIntInPlace(target, replacement)
+                assertTrue(modified, "In-place replacement failed at iteration $iteration for target $target")
+
+                val decodedView = byteArrayTag.toVarIntShortArray(size, arena)
+
+                for (index in 0 until size) {
+                    assertEquals(
+                        expectedArray[index],
+                        decodedView[index],
+                        "Mismatch at index $index in fuzzing iteration $iteration (target=$target, replacement=$replacement)",
+                    )
+                }
+            }
+        }
+    }
+
+    @Test
+    fun testReplaceVarIntInPlaceBoundaryConditions() {
+        Arena.ofConfined().use { arena ->
+            // test critical vector sizes around 32-byte and 64-byte AVX2 boundaries
+            val boundarySizes = intArrayOf(
+                0, 1, 2, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129,
+                255, 256, 257, 1023, 1024, 1025, 65535, 65536, 65537,
+            )
+
+            for (size in boundarySizes) {
+                if (size == 0) continue
+
+                val originalArray = ShortArray(size) { index ->
+                    when {
+                        index == 31 -> 256.toShort() // multi-byte VarInt exactly straddling byte 31-32
+                        index % 2 == 0 -> 0.toShort()
+                        else -> 42.toShort()
+                    }
+                }
+
+                val expectedArray = ShortArray(size) { index ->
+                    when {
+                        index == 31 -> 256.toShort()
+                        index % 2 == 0 -> 99.toShort()
+                        else -> 42.toShort()
+                    }
+                }
+
+                val shortView = NativeShortView.of(originalArray, arena)
+                val byteArrayTag = shortView.toVarIntByteArray(arena)
+
+                val success = byteArrayTag.replaceVarIntInPlace(0.toShort(), 99.toShort())
+                assertTrue(success, "Failed boundary condition at size $size")
+
+                val decodedView = byteArrayTag.toVarIntShortArray(size, arena)
+
+                for (index in 0 until size) {
+                    assertEquals(
+                        expectedArray[index],
+                        decodedView[index],
+                        "Mismatch at index $index for boundary size $size",
+                    )
+                }
+            }
+        }
+    }
+
+    @Test
+    fun testReplaceVarIntInPlaceParallelPartitions() {
+        Arena.ofConfined().use { arena ->
+            // large dataset to heavily exercise parallel AVX2 partitioning across all cores
+            val elementCount = 1_000_000
+            val originalArray = ShortArray(elementCount) { index ->
+                when {
+                    index % 100 == 0 -> 1000.toShort() // multi-byte
+                    index % 3 == 0 -> 7.toShort()       // target
+                    else -> 12.toShort()
+                }
+            }
+
+            val expectedArray = ShortArray(elementCount) { index ->
+                when {
+                    index % 100 == 0 -> 1000.toShort()
+                    index % 3 == 0 -> 99.toShort()      // replacement
+                    else -> 12.toShort()
+                }
+            }
+
+            val shortView = NativeShortView.of(originalArray, arena)
+            val byteArrayTag = shortView.toVarIntByteArray(arena)
+
+            val success = byteArrayTag.replaceVarIntInPlace(7.toShort(), 99.toShort())
+            assertTrue(success, "Parallel in-place replacement failed")
+
+            val decodedView = byteArrayTag.toVarIntShortArray(elementCount, arena)
+
+            for (index in 0 until elementCount) {
+                assertEquals(
+                    expectedArray[index],
+                    decodedView[index],
+                    "Parallel mismatch at index $index",
+                )
+            }
+        }
+    }
+
 }
+

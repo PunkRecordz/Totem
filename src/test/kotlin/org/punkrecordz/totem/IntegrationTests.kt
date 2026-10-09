@@ -4,6 +4,7 @@ import net.querz.nbt.io.NBTUtil
 import org.junit.jupiter.api.Test
 import org.punkrecordz.totem.io.compression.CompressionType
 import org.punkrecordz.totem.tag.Tags
+import org.punkrecordz.totem.view.replaceVarIntInPlace
 import org.punkrecordz.totem.view.toVarIntByteArray
 import org.punkrecordz.totem.view.toVarIntShortArray
 import java.lang.foreign.Arena
@@ -161,6 +162,86 @@ class IntegrationTests {
             destination[dstIndex++] = value.toShort()
         }
         return destination
+    }
+
+    @Test
+    fun testInPlacePipelineCrossValidatedWithQuerz() {
+        val tempOutputFile = Path("temp_inplace_integration_output.schem")
+        tempOutputFile.deleteIfExists()
+
+        try {
+            Arena.ofConfined().use { arena ->
+                // 1. Load schematic with Totem
+                val (name, root) = Totem.load(schematicPath, arena)
+                val schematic = if (root.containsKey("Width")) root else root.getCompound("Schematic")!!
+
+                val width = schematic.getShort("Width")!!.toInt()
+                val height = schematic.getShort("Height")!!.toInt()
+                val length = schematic.getShort("Length")!!.toInt()
+                val volume = width * height * length
+
+                val isV3 = schematic.containsKey("BlockData")
+                val dataTag = if (isV3) {
+                    schematic.getByteArray("BlockData")!!
+                } else {
+                    schematic.getCompound("Blocks")!!.getByteArray("Data")!!
+                }
+
+                // 2. Perform zero-allocation in-place replacement (air -> stone)
+                val inPlaceSuccess = dataTag.replaceVarIntInPlace(
+                    0.toShort(),
+                    1.toShort(),
+                )
+                assertTrue(inPlaceSuccess, "replaceVarIntInPlace returned false")
+
+                // 3. Save modified schematic to disk
+                Totem.save(name, root, tempOutputFile, CompressionType.GZIP)
+                assertTrue(tempOutputFile.exists())
+
+                // 4. Independently compute the exact expected ground-truth with Querz on original schematic
+                val originalQuerzNamedTag = NBTUtil.read(schematicPath.toFile())
+                val originalQuerzRoot = originalQuerzNamedTag.tag as QuerzCompoundTag
+                val originalQuerzSchem = if (originalQuerzRoot.containsKey("Width")) originalQuerzRoot else originalQuerzRoot.getCompoundTag("Schematic")!!
+                val originalQuerzBytes = if (isV3) {
+                    originalQuerzSchem.getByteArray("BlockData")
+                } else {
+                    originalQuerzSchem.getCompoundTag("Blocks").getByteArray("Data")
+                }
+                val expectedBlocks = originalQuerzBytes.toVarInt(volume)
+                for (index in 0 until volume) {
+                    if (expectedBlocks[index] == 0.toShort()) {
+                        expectedBlocks[index] = 1.toShort()
+                    }
+                }
+
+                // 5. Read Totem's saved file with Querz to ensure 100% external format compliance
+                val savedQuerzNamedTag = NBTUtil.read(tempOutputFile.toFile())
+                val savedQuerzRoot = savedQuerzNamedTag.tag as QuerzCompoundTag
+                val savedQuerzSchem = if (savedQuerzRoot.containsKey("Width")) savedQuerzRoot else savedQuerzRoot.getCompoundTag("Schematic")!!
+                val savedQuerzBytes = if (isV3) {
+                    savedQuerzSchem.getByteArray("BlockData")
+                } else {
+                    savedQuerzSchem.getCompoundTag("Blocks").getByteArray("Data")
+                }
+                val actualBlocks = savedQuerzBytes.toVarInt(volume)
+
+                assertEquals(volume, actualBlocks.size)
+
+                // 6. Verify strict equality for every single block across all 44.7 million blocks
+                var mismatches = 0
+                for (index in 0 until volume) {
+                    if (expectedBlocks[index] != actualBlocks[index]) {
+                        mismatches++
+                        if (mismatches <= 5) {
+                            println("Block mismatch at index $index: expected ${expectedBlocks[index]}, actual ${actualBlocks[index]}")
+                        }
+                    }
+                }
+                assertEquals(0, mismatches, "Detected $mismatches block mismatches between Totem in-place and Querz ground truth!")
+            }
+        } finally {
+            tempOutputFile.deleteIfExists()
+        }
     }
 
 }
