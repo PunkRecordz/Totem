@@ -50,6 +50,12 @@ object TotemSys {
         ValueLayout.JAVA_LONG,
     )
 
+    private val countTerminalsDescriptor = FunctionDescriptor.of(
+        ValueLayout.JAVA_LONG,
+        ValueLayout.ADDRESS,
+        ValueLayout.JAVA_LONG,
+    )
+
     private val criticalOption = Linker.Option.critical(false)
 
     private val decodeMethodHandle by lazy {
@@ -68,6 +74,12 @@ object TotemSys {
         val symbol = nativeLibrary.find("varint_encoded_size")
             .orElseThrow { UnsatisfiedLinkError("Symbol varint_encoded_size not found in totem-sys native library") }
         nativeLinker.downcallHandle(symbol, sizeDescriptor, criticalOption)
+    }
+
+    private val countTerminalsMethodHandle by lazy {
+        val symbol = nativeLibrary.find("count_varint_terminals")
+            .orElseThrow { UnsatisfiedLinkError("Symbol count_varint_terminals not found in totem-sys native library") }
+        nativeLinker.downcallHandle(symbol, countTerminalsDescriptor, criticalOption)
     }
 
     fun decodeVarIntShorts(
@@ -116,6 +128,16 @@ object TotemSys {
         sourceLength: Long,
     ): Long {
         return sizeMethodHandle.invokeExact(
+            sourceSlice,
+            sourceLength,
+        ) as Long
+    }
+
+    fun countVarIntTerminals(
+        sourceSlice: MemorySegment,
+        sourceLength: Long = sourceSlice.byteSize(),
+    ): Long {
+        return countTerminalsMethodHandle.invokeExact(
             sourceSlice,
             sourceLength,
         ) as Long

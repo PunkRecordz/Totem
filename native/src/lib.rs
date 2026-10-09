@@ -390,19 +390,23 @@ pub unsafe extern "C" fn encode_shorts_varint(
     #[cfg(not(target_arch = "x86_64"))]
     let (mut source_offset, mut destination_offset) = (0usize, 0usize);
 
-    // parallel fast path: encode 4 elements at once
-    while source_offset + 4 <= source.len() {
-        if let Some((new_src, new_dest)) = unsafe { encode_parallel_4(source, source_offset, destination, destination_offset) } {
-            source_offset = new_src;
-            destination_offset = new_dest;
-        } else {
-            let value = unsafe { *source.get_unchecked(source_offset) };
-            source_offset += 1;
-            destination_offset = unsafe { encode_single_branchless(value, destination, destination_offset) };
+    // parallel fast path: encode 4 elements at once, but stop at least 4 elements before the end
+    // to guarantee that encode_single_branchless (which writes a u32) never overshoots the buffer boundary
+    let safe_end = source.len().saturating_sub(4);
+    while source_offset < safe_end {
+        if source_offset + 4 <= safe_end {
+            if let Some((new_src, new_dest)) = unsafe { encode_parallel_4(source, source_offset, destination, destination_offset) } {
+                source_offset = new_src;
+                destination_offset = new_dest;
+                continue;
+            }
         }
+        let value = unsafe { *source.get_unchecked(source_offset) };
+        source_offset += 1;
+        destination_offset = unsafe { encode_single_branchless(value, destination, destination_offset) };
     }
 
-    // clean up remaining elements near buffer end
+    // clean up remaining elements near buffer end strictly byte-by-byte (zero overshoot)
     while source_offset < source.len() {
         let value = unsafe { *source.get_unchecked(source_offset) };
         source_offset += 1;
@@ -522,9 +526,90 @@ pub unsafe extern "C" fn varint_encoded_size(
     unsafe { varint_encoded_size_swar(src_ptr, len) as u64 }
 }
 
+/// Counts the number of terminal VarInt bytes (MSB == 0) in the byte slice using AVX2.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn count_varint_terminals_avx2(src: *const u8, len: usize) -> usize {
+    use core::arch::x86_64::*;
+
+    let mut offset = 0;
+    let mut count = 0usize;
+
+    while offset + 32 <= len {
+        let chunk = _mm256_loadu_si256(src.add(offset) as *const __m256i);
+        let mask = _mm256_movemask_epi8(chunk) as u32;
+        count += 32 - mask.count_ones() as usize;
+        offset += 32;
+    }
+
+    while offset < len {
+        if (*src.add(offset) & 0x80) == 0 {
+            count += 1;
+        }
+        offset += 1;
+    }
+
+    count
+}
+
+/// Fallback terminal counter using 64-bit SWAR.
+#[inline(always)]
+unsafe fn count_varint_terminals_swar(src: *const u8, len: usize) -> usize {
+    let mut offset = 0;
+    let mut count = 0usize;
+
+    while offset + 8 <= len {
+        let pointer = src.add(offset) as *const u64;
+        let packed = u64::from_le(core::ptr::read_unaligned(pointer));
+        let msbs = packed & 0x8080808080808080;
+        let msb_count = (msbs >> 7).wrapping_mul(0x0101010101010101) >> 56;
+        count += 8 - (msb_count as usize & 0xFF);
+        offset += 8;
+    }
+
+    while offset < len {
+        if (*src.add(offset) & 0x80) == 0 {
+            count += 1;
+        }
+        offset += 1;
+    }
+
+    count
+}
+
+/// Counts how many terminal VarInt bytes (bytes with MSB == 0) exist in `src_ptr[0..src_len]`.
+/// In standard Minecraft VarInt encoding, each terminal byte corresponds to exactly one decoded integer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn count_varint_terminals(
+    src_ptr: *const u8,
+    src_len: u64,
+) -> u64 {
+    let len = src_len as usize;
+
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("avx2") {
+        return unsafe { count_varint_terminals_avx2(src_ptr, len) } as u64;
+    }
+
+    unsafe { count_varint_terminals_swar(src_ptr, len) as u64 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_count_varint_terminals() {
+        let sample = vec![
+            0x01,                   // 1 terminal (1 byte)
+            0x80, 0x01,             // 1 terminal (2 bytes)
+            0x80, 0x80, 0x01,       // 1 terminal (3 bytes)
+            0x05,                   // 1 terminal (1 byte)
+            0x00,                   // 1 terminal (1 byte)
+        ];
+        let count = unsafe { count_varint_terminals(sample.as_ptr(), sample.len() as u64) };
+        assert_eq!(count, 5);
+    }
 
     #[test]
     fn test_varint_encoded_size_correctness() {
