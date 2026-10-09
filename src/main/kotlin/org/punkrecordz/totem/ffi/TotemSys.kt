@@ -82,6 +82,22 @@ object TotemSys {
         nativeLinker.downcallHandle(symbol, countTerminalsDescriptor, criticalOption)
     }
 
+    private val partitionStreamDescriptor = FunctionDescriptor.of(
+        ValueLayout.JAVA_LONG,
+        ValueLayout.ADDRESS,
+        ValueLayout.JAVA_LONG,
+        ValueLayout.JAVA_INT,
+        ValueLayout.ADDRESS,
+        ValueLayout.ADDRESS,
+        ValueLayout.ADDRESS,
+    )
+
+    private val partitionStreamMethodHandle by lazy {
+        val symbol = nativeLibrary.find("partition_varint_stream")
+            .orElseThrow { UnsatisfiedLinkError("Symbol partition_varint_stream not found in totem-sys native library") }
+        nativeLinker.downcallHandle(symbol, partitionStreamDescriptor, criticalOption)
+    }
+
     fun decodeVarIntShorts(
         sourceSlice: MemorySegment,
         destinationSlice: MemorySegment,
@@ -140,6 +156,23 @@ object TotemSys {
         return countTerminalsMethodHandle.invokeExact(
             sourceSlice,
             sourceLength,
+        ) as Long
+    }
+
+    fun partitionVarIntStream(
+        sourceSlice: MemorySegment,
+        partitionCount: Int,
+        outByteStarts: MemorySegment,
+        outShortOffsets: MemorySegment,
+        outShortCounts: MemorySegment,
+    ): Long {
+        return partitionStreamMethodHandle.invokeExact(
+            sourceSlice,
+            sourceSlice.byteSize(),
+            partitionCount,
+            outByteStarts,
+            outShortOffsets,
+            outShortCounts,
         ) as Long
     }
 

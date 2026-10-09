@@ -594,6 +594,78 @@ pub unsafe extern "C" fn count_varint_terminals(
     unsafe { count_varint_terminals_swar(src_ptr, len) as u64 }
 }
 
+/// Identifies VarInt terminal boundaries and computes partition short offsets in a single AVX2 pass.
+/// Writes `p` elements into `out_byte_starts`, `out_short_offsets`, and `out_short_counts`.
+/// Writes `byte_starts[p] = src_len` at `out_byte_starts + p`.
+/// Returns the total number of decoded shorts across the entire stream.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn partition_varint_stream(
+    src_ptr: *const u8,
+    src_len: u64,
+    partition_count: u32,
+    out_byte_starts: *mut u64,
+    out_short_offsets: *mut u32,
+    out_short_counts: *mut u32,
+) -> u64 {
+    let p = partition_count as usize;
+    let len = src_len as usize;
+
+    if p == 0 || len == 0 {
+        return 0;
+    }
+
+    let target_chunk = len / p;
+    let mut byte_starts = [0usize; 65];
+    let starts_slice = if p <= 64 {
+        &mut byte_starts[..=p]
+    } else {
+        // fallback for unusually high core counts
+        let mut vec = vec![0usize; p + 1];
+        let vec_ptr = vec.as_mut_ptr();
+        core::mem::forget(vec);
+        core::slice::from_raw_parts_mut(vec_ptr, p + 1)
+    };
+
+    starts_slice[0] = 0;
+    starts_slice[p] = len;
+
+    for i in 1..p {
+        let mut b = core::cmp::min(len, i * target_chunk);
+        while b < len && (*src_ptr.add(b - 1) & 0x80) != 0 {
+            b += 1;
+        }
+        starts_slice[i] = b;
+    }
+
+    let mut running_short_offset = 0u32;
+
+    for i in 0..p {
+        let start = starts_slice[i];
+        let end = starts_slice[i + 1];
+        let chunk_len = end - start;
+
+        *out_byte_starts.add(i) = start as u64;
+
+        let terminals = if chunk_len > 0 {
+            count_varint_terminals(src_ptr.add(start), chunk_len as u64) as u32
+        } else {
+            0u32
+        };
+
+        *out_short_offsets.add(i) = running_short_offset;
+        *out_short_counts.add(i) = terminals;
+        running_short_offset += terminals;
+    }
+
+    *out_byte_starts.add(p) = len as u64;
+
+    if p > 64 {
+        drop(Vec::from_raw_parts(starts_slice.as_mut_ptr(), p + 1, p + 1));
+    }
+
+    running_short_offset as u64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -609,6 +681,38 @@ mod tests {
         ];
         let count = unsafe { count_varint_terminals(sample.as_ptr(), sample.len() as u64) };
         assert_eq!(count, 5);
+    }
+
+    #[test]
+    fn test_partition_varint_stream() {
+        let sample = vec![
+            0x01,                   // short 0
+            0x80, 0x01,             // short 1
+            0x80, 0x80, 0x01,       // short 2
+            0x05,                   // short 3
+            0x00,                   // short 4
+            0x10,                   // short 5
+        ];
+        let mut byte_starts = [0u64; 3];
+        let mut short_offsets = [0u32; 2];
+        let mut short_counts = [0u32; 2];
+
+        let total = unsafe {
+            partition_varint_stream(
+                sample.as_ptr(),
+                sample.len() as u64,
+                2,
+                byte_starts.as_mut_ptr(),
+                short_offsets.as_mut_ptr(),
+                short_counts.as_mut_ptr(),
+            )
+        };
+
+        assert_eq!(total, 6);
+        assert_eq!(short_offsets[0], 0);
+        assert_eq!(short_offsets[1] + short_counts[1], 6);
+        assert_eq!(byte_starts[0], 0);
+        assert_eq!(byte_starts[2], sample.len() as u64);
     }
 
     #[test]

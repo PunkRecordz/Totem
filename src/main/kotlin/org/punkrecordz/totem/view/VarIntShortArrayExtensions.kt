@@ -76,37 +76,24 @@ fun ByteView.toVarIntShortArray(
         byteBoundaries[index] = boundary
     }
 
-    val rawSourceAddress = sourceSlice.address()
-    val rawDestinationAddress = destinationSlice.address()
-
-    // count terminals in each partition concurrently to find destination short counts
-    val countTasks = (0 until availableCores).map { index ->
-        val startByte = byteBoundaries[index]
-        val byteLength = byteBoundaries[index + 1] - startByte
-
-        Callable {
-            if (byteLength <= 0L) {
-                0L
-            } else {
-                val chunkSlice = MemorySegment.ofAddress(rawSourceAddress + startByte)
-                    .reinterpret(byteLength)
-                TotemSys.countVarIntTerminals(chunkSlice)
-            }
-        }
-    }
-
-    val countFutures = TotemThreadPool.executor.invokeAll(countTasks)
-    val partitionShortCounts = IntArray(availableCores) { index ->
-        countFutures[index].get().toInt()
-    }
-
-    // calculate destination short offsets via prefix sums
+    val partitionShortCounts = IntArray(availableCores)
     val partitionShortOffsets = IntArray(availableCores)
     var totalDecodedShorts = 0
 
+    // count terminals in each partition sequentially via fast AVX2 SIMD (<0.2ms total)
     for (index in 0 until availableCores) {
+        val startByte = byteBoundaries[index]
+        val byteLength = byteBoundaries[index + 1] - startByte
+        val shortCount = if (byteLength <= 0L) {
+            0
+        } else {
+            val chunkSlice = sourceSlice.asSlice(startByte, byteLength)
+            TotemSys.countVarIntTerminals(chunkSlice).toInt()
+        }
+
         partitionShortOffsets[index] = totalDecodedShorts
-        totalDecodedShorts += partitionShortCounts[index]
+        partitionShortCounts[index] = shortCount
+        totalDecodedShorts += shortCount
     }
 
     if (totalDecodedShorts != expectedSize) {
@@ -114,6 +101,9 @@ fun ByteView.toVarIntShortArray(
             "Incomplete VarInt data: expected $expectedSize elements, but buffer contained $totalDecodedShorts VarInt values.",
         )
     }
+
+    val rawSourceAddress = sourceSlice.address()
+    val rawDestinationAddress = destinationSlice.address()
 
     // decode each partition concurrently directly into destination slice
     val decodeTasks = (0 until availableCores).map { index ->

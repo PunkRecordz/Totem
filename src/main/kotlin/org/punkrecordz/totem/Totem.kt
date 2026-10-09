@@ -6,6 +6,7 @@ import org.punkrecordz.totem.io.MemoryLayouts
 import org.punkrecordz.totem.io.allocateUninitialized
 import org.punkrecordz.totem.io.compression.Compression
 import org.punkrecordz.totem.io.compression.CompressionType
+import org.punkrecordz.totem.io.memory.OffHeapScratchBuffer
 import org.punkrecordz.totem.io.stream.BinaryTagWriter
 import org.punkrecordz.totem.io.stream.NativeBinaryTagWriter
 import org.punkrecordz.totem.io.stream.NativeByteArrayOutputStream
@@ -108,11 +109,9 @@ object Totem {
             return uncompressedSegment
         }
 
-        return Arena.ofConfined().use { tempArena ->
-            val uncompressedSegment = tempArena.allocateUninitialized(totalSize)
-            writeUncompressed(uncompressedSegment, name, root)
-            compression.compress(uncompressedSegment, arena)
-        }
+        val uncompressedSegment = OffHeapScratchBuffer.getSerializationBuffer().acquire(totalSize)
+        writeUncompressed(uncompressedSegment, name, root)
+        return compression.compress(uncompressedSegment, arena)
     }
 
     fun save(
