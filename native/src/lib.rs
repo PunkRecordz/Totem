@@ -27,21 +27,20 @@ unsafe fn decode_single(source: &[u8], offset: &mut usize) -> Option<u16> {
 /// Returns the decoded short and the new source offset.
 #[inline(always)]
 fn decode_single_from_packed(packed: u32, offset: usize) -> (u16, usize) {
-    let v0 = packed & 0x7F;
-    let b0_msb = (packed & 0x80) >> 7;
-    let b1_msb = (packed & 0x8000) >> 15;
+    let b0 = (packed & 0xFF) as u8;
+    if (b0 & 0x80) == 0 {
+        return (b0 as u16, offset + 1);
+    }
 
-    let m1 = 0u32.wrapping_sub(b0_msb);
-    let b0_and_b1 = b0_msb & b1_msb;
-    let m2 = 0u32.wrapping_sub(b0_and_b1);
+    let b1 = ((packed >> 8) & 0xFF) as u8;
+    if (b1 & 0x80) == 0 {
+        let val = ((b0 & 0x7F) as u16) | (((b1 & 0x7F) as u16) << 7);
+        return (val, offset + 2);
+    }
 
-    let v1_contrib = ((packed >> 8) & 0x7F) & m1;
-    let v2_contrib = ((packed >> 16) & 0x7F) & m2;
-
-    let value = v0 | (v1_contrib << 7) | (v2_contrib << 14);
-    let length = 1 + b0_msb + b0_and_b1;
-
-    (value as u16, offset + length as usize)
+    let b2 = ((packed >> 16) & 0xFF) as u8;
+    let val = ((b0 & 0x7F) as u16) | (((b1 & 0x7F) as u16) << 7) | (((b2 & 0x7F) as u16) << 14);
+    (val, offset + 3)
 }
 
 /// Decodes 32 VarInts at a time using AVX2 when all 32 bytes are 1-byte VarInts (MSB = 0).
