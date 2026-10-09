@@ -3,6 +3,7 @@ package org.punkrecordz.totem
 import net.querz.nbt.io.NBTUtil
 import org.junit.jupiter.api.Test
 import org.punkrecordz.totem.impl.native.NativeByteArrayTag
+import org.punkrecordz.totem.impl.native.NativeShortView
 import org.punkrecordz.totem.io.MemoryLayouts
 import org.punkrecordz.totem.tag.TagType
 import org.punkrecordz.totem.tag.Tags
@@ -372,6 +373,33 @@ class UnitTests {
             } finally {
                 temporaryFile.deleteIfExists()
             }
+        }
+    }
+
+    @Test
+    fun testNativeShortViewReplaceAllAndFill() {
+        Arena.ofConfined().use { arena ->
+            val size = 100_000
+            val view = NativeShortView.of(size, arena)
+
+            view.fill(0.toShort())
+            assertEquals(0.toShort(), view[0])
+            assertEquals(0.toShort(), view[size - 1])
+
+            view[10] = 5.toShort()
+            view[500] = 5.toShort()
+            view[99_999] = 5.toShort()
+
+            view.replaceAll(5.toShort(), 42.toShort())
+            assertEquals(42.toShort(), view[10])
+            assertEquals(42.toShort(), view[500])
+            assertEquals(42.toShort(), view[99_999])
+            assertEquals(0.toShort(), view[0])
+
+            view.fill(7.toShort())
+            assertEquals(7.toShort(), view[0])
+            assertEquals(7.toShort(), view[10])
+            assertEquals(7.toShort(), view[size - 1])
         }
     }
 

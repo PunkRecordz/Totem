@@ -54,8 +54,6 @@ unsafe fn decode_varint_shorts_avx2(
 ) -> (usize, usize) {
     use core::arch::x86_64::*;
 
-    let zero = _mm_setzero_si128();
-
     while source_offset + 32 <= source.len() && destination_offset + 32 <= destination.len() {
         let chunk = _mm256_loadu_si256(source.as_ptr().add(source_offset) as *const __m256i);
         let mask = _mm256_movemask_epi8(chunk);
@@ -65,16 +63,12 @@ unsafe fn decode_varint_shorts_avx2(
             let low_128 = _mm256_castsi256_si128(chunk);
             let high_128 = _mm256_extracti128_si256(chunk, 1);
 
-            let s0 = _mm_unpacklo_epi8(low_128, zero);
-            let s1 = _mm_unpackhi_epi8(low_128, zero);
-            let s2 = _mm_unpacklo_epi8(high_128, zero);
-            let s3 = _mm_unpackhi_epi8(high_128, zero);
+            let shorts_low = _mm256_cvtepu8_epi16(low_128);
+            let shorts_high = _mm256_cvtepu8_epi16(high_128);
 
-            let dest_ptr = destination.as_mut_ptr().add(destination_offset);
-            _mm_storeu_si128(dest_ptr as *mut __m128i, s0);
-            _mm_storeu_si128(dest_ptr.add(8) as *mut __m128i, s1);
-            _mm_storeu_si128(dest_ptr.add(16) as *mut __m128i, s2);
-            _mm_storeu_si128(dest_ptr.add(24) as *mut __m128i, s3);
+            let dest_ptr = destination.as_mut_ptr().add(destination_offset) as *mut __m256i;
+            _mm256_storeu_si256(dest_ptr, shorts_low);
+            _mm256_storeu_si256(dest_ptr.add(1), shorts_high);
 
             source_offset += 32;
             destination_offset += 32;
@@ -666,6 +660,108 @@ pub unsafe extern "C" fn partition_varint_stream(
     running_short_offset as u64
 }
 
+/// Replaces all occurrences of `target` with `replacement` in-place using AVX2 SIMD.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn replace_shorts(
+    data: *mut i16,
+    len: u64,
+    target: i16,
+    replacement: i16,
+) {
+    if data.is_null() || len == 0 {
+        return;
+    }
+
+    let slice = core::slice::from_raw_parts_mut(data, len as usize);
+
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("avx2") {
+        replace_shorts_avx2(slice, target, replacement);
+        return;
+    }
+
+    replace_shorts_fallback(slice, target, replacement);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn replace_shorts_avx2(slice: &mut [i16], target: i16, replacement: i16) {
+    use core::arch::x86_64::*;
+
+    let target_vec = _mm256_set1_epi16(target);
+    let repl_vec = _mm256_set1_epi16(replacement);
+    let mut i = 0;
+    let len = slice.len();
+
+    while i + 16 <= len {
+        let ptr = slice.as_mut_ptr().add(i) as *mut __m256i;
+        let data = _mm256_loadu_si256(ptr);
+        let mask = _mm256_cmpeq_epi16(data, target_vec);
+        let result = _mm256_blendv_epi8(data, repl_vec, mask);
+        _mm256_storeu_si256(ptr, result);
+        i += 16;
+    }
+
+    while i < len {
+        let element = slice.get_unchecked_mut(i);
+        if *element == target {
+            *element = replacement;
+        }
+        i += 1;
+    }
+}
+
+unsafe fn replace_shorts_fallback(slice: &mut [i16], target: i16, replacement: i16) {
+    for element in slice.iter_mut() {
+        if *element == target {
+            *element = replacement;
+        }
+    }
+}
+
+/// Fills all elements in `data` with `value` in-place using AVX2 SIMD.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fill_shorts(
+    data: *mut i16,
+    len: u64,
+    value: i16,
+) {
+    if data.is_null() || len == 0 {
+        return;
+    }
+
+    let slice = core::slice::from_raw_parts_mut(data, len as usize);
+
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("avx2") {
+        fill_shorts_avx2(slice, value);
+        return;
+    }
+
+    slice.fill(value);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn fill_shorts_avx2(slice: &mut [i16], value: i16) {
+    use core::arch::x86_64::*;
+
+    let val_vec = _mm256_set1_epi16(value);
+    let mut i = 0;
+    let len = slice.len();
+
+    while i + 16 <= len {
+        let ptr = slice.as_mut_ptr().add(i) as *mut __m256i;
+        _mm256_storeu_si256(ptr, val_vec);
+        i += 16;
+    }
+
+    while i < len {
+        *slice.get_unchecked_mut(i) = value;
+        i += 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -751,5 +847,23 @@ mod tests {
         let read = unsafe { decode_varint_shorts(encoded.as_ptr(), written, decoded.as_mut_ptr(), sample.len() as u32) };
         assert_eq!(read, written as i64);
         assert_eq!(sample, decoded);
+    }
+
+    #[test]
+    fn test_replace_shorts() {
+        let mut sample = vec![0i16, 1, 0, 2, 3, 0, 4, 5, 0, 0, 6, 7, 8, 9, 10, 0, 11, 0];
+        unsafe {
+            replace_shorts(sample.as_mut_ptr(), sample.len() as u64, 0, 42);
+        }
+        assert_eq!(sample, vec![42i16, 1, 42, 2, 3, 42, 4, 5, 42, 42, 6, 7, 8, 9, 10, 42, 11, 42]);
+    }
+
+    #[test]
+    fn test_fill_shorts() {
+        let mut sample = vec![0i16; 35];
+        unsafe {
+            fill_shorts(sample.as_mut_ptr(), sample.len() as u64, 99);
+        }
+        assert_eq!(sample, vec![99i16; 35]);
     }
 }

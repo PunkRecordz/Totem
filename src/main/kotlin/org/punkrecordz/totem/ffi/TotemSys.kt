@@ -98,6 +98,31 @@ object TotemSys {
         nativeLinker.downcallHandle(symbol, partitionStreamDescriptor, criticalOption)
     }
 
+    private val replaceShortsDescriptor = FunctionDescriptor.ofVoid(
+        ValueLayout.ADDRESS,
+        ValueLayout.JAVA_LONG,
+        ValueLayout.JAVA_SHORT,
+        ValueLayout.JAVA_SHORT,
+    )
+
+    private val replaceShortsMethodHandle by lazy {
+        val symbol = nativeLibrary.find("replace_shorts")
+            .orElseThrow { UnsatisfiedLinkError("Symbol replace_shorts not found in totem-sys native library") }
+        nativeLinker.downcallHandle(symbol, replaceShortsDescriptor, criticalOption)
+    }
+
+    private val fillShortsDescriptor = FunctionDescriptor.ofVoid(
+        ValueLayout.ADDRESS,
+        ValueLayout.JAVA_LONG,
+        ValueLayout.JAVA_SHORT,
+    )
+
+    private val fillShortsMethodHandle by lazy {
+        val symbol = nativeLibrary.find("fill_shorts")
+            .orElseThrow { UnsatisfiedLinkError("Symbol fill_shorts not found in totem-sys native library") }
+        nativeLinker.downcallHandle(symbol, fillShortsDescriptor, criticalOption)
+    }
+
     fun decodeVarIntShorts(
         sourceSlice: MemorySegment,
         destinationSlice: MemorySegment,
@@ -174,6 +199,32 @@ object TotemSys {
             outShortOffsets,
             outShortCounts,
         ) as Long
+    }
+
+    fun replaceShorts(
+        dataSlice: MemorySegment,
+        length: Long,
+        target: Short,
+        replacement: Short,
+    ) {
+        replaceShortsMethodHandle.invokeExact(
+            dataSlice,
+            length,
+            target,
+            replacement,
+        )
+    }
+
+    fun fillShorts(
+        dataSlice: MemorySegment,
+        length: Long,
+        value: Short,
+    ) {
+        fillShortsMethodHandle.invokeExact(
+            dataSlice,
+            length,
+            value,
+        )
     }
 
     private fun getPlatformName(): String {

@@ -51,6 +51,78 @@ open class JmhBenchmarks {
             }
 
             val blocks = dataTag.toVarIntShortArray(volume, arena)
+            blocks.replaceAll(0.toShort(), 1.toShort())
+
+            val modifiedData = blocks.toVarIntByteArray(arena)
+
+            // rebuild nbt hierarchy because native tags are immutable off-heap views
+            val newRoot = if (root.containsKey("Width")) {
+                Tags.compound().apply {
+                    for ((key, value) in root) {
+                        if (key == "BlockData") {
+                            put(key, modifiedData)
+                        } else {
+                            put(key, value)
+                        }
+                    }
+                }
+            } else {
+                val blocksCompound = schematic.getCompound("Blocks")!!
+                val newBlocksCompound = Tags.compound().apply {
+                    for ((key, value) in blocksCompound) {
+                        if (key == "Data") {
+                            put(key, modifiedData)
+                        } else {
+                            put(key, value)
+                        }
+                    }
+                }
+
+                val newSchematic = Tags.compound().apply {
+                    for ((key, value) in schematic) {
+                        if (key == "Blocks") {
+                            put(key, newBlocksCompound)
+                        } else {
+                            put(key, value)
+                        }
+                    }
+                }
+
+                Tags.compound().apply {
+                    for ((key, value) in root) {
+                        if (key == "Schematic") {
+                            put(key, newSchematic)
+                        } else {
+                            put(key, value)
+                        }
+                    }
+                }
+            }
+
+            Totem.save(name, newRoot, tempTotemPath, CompressionType.GZIP)
+            return tempTotemPath.toFile().length()
+        }
+    }
+
+    @Benchmark
+    fun benchmarkTotemPipelineScalar(): Long {
+        Arena.ofConfined().use { arena ->
+            val (name, root) = Totem.load(schematicPath, arena)
+
+            // support both sponge schematic v2 and v3 formats
+            val schematic = if (root.containsKey("Width")) root else root.getCompound("Schematic")!!
+            val width = schematic.getShort("Width")!!.toInt()
+            val height = schematic.getShort("Height")!!.toInt()
+            val length = schematic.getShort("Length")!!.toInt()
+            val volume = width * height * length
+
+            val dataTag = if (schematic.containsKey("BlockData")) {
+                schematic.getByteArray("BlockData")!!
+            } else {
+                schematic.getCompound("Blocks")!!.getByteArray("Data")!!
+            }
+
+            val blocks = dataTag.toVarIntShortArray(volume, arena)
             for (index in 0 until blocks.size) {
                 if (blocks[index] == 0.toShort()) {
                     blocks[index] = 1.toShort()

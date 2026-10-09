@@ -283,11 +283,9 @@ object Totem {
             return uncompressedSegment
         }
 
-        return Arena.ofConfined().use { tempArena ->
-            val uncompressedSegment = tempArena.allocateUninitialized(totalSize)
-            writeUncompressedTag(uncompressedSegment, tag)
-            compression.compress(uncompressedSegment, arena)
-        }
+        val uncompressedSegment = OffHeapScratchBuffer.getSerializationBuffer().acquire(totalSize)
+        writeUncompressedTag(uncompressedSegment, tag)
+        return compression.compress(uncompressedSegment, arena)
     }
 
     fun saveTag(
