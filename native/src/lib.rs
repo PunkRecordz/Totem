@@ -877,10 +877,139 @@ unsafe fn fill_shorts_avx2(slice: &mut [i16], value: i16) {
 }
 
 /// Translates all 16-bit short integers in-place according to a 65,536-entry lookup table.
+/// Translates an array of short values in place using a 65536-entry lookup table.
 ///
 /// Strategy:
-/// Direct 16x unrolled memory accesses across native pointers without intermediate heap allocation.
-/// When combined with multi-core partitioning in Kotlin Panama FFM, this yields multi-gigabyte/sec throughput.
+/// Employs 256-bit AVX2 SIMD with two critical architectural speedups:
+/// 1. 64-byte Cacheline Zero Fastpath: Tests if an entire 32-element chunk is all zeroes (air).
+///    When `lut[0] == 0`, skips the lookups and stores completely in ~2 clock cycles.
+/// 2. Vectorized Write-Bypass: Evaluates whether translated shorts match existing memory.
+///    If all 16 shorts in a vector are unchanged (identity mapping), stores are completely
+///    skipped, eliminating dirty cache line writebacks and bus Request For Ownership (RFO) stalls.
+/// 3. Single-instruction Vector Stores: When modifications occur, writes all 16 shorts at once
+///    using `_mm256_storeu_si256` instead of 16 individual scalar stores.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn translate_shorts_lut_avx2(
+    data: *mut i16,
+    len: usize,
+    lut_slice: &[i16],
+) -> usize {
+    use core::arch::x86_64::*;
+
+    let lut_0 = *lut_slice.get_unchecked(0);
+    let mut i = 0;
+
+    // process 32 shorts (64 bytes = 1 full cpu cache line) per iteration
+    while i + 32 <= len {
+        let p = data.add(i);
+        let c0 = _mm256_loadu_si256(p as *const __m256i);
+        let c1 = _mm256_loadu_si256(p.add(16) as *const __m256i);
+
+        // fast path: if the entire 64-byte line is all zeroes (air) and lut[0] == 0, skip completely
+        let or_combined = _mm256_or_si256(c0, c1);
+        if lut_0 == 0 && _mm256_testz_si256(or_combined, or_combined) != 0 {
+            i += 32;
+            continue;
+        }
+
+        // process chunk 0 (16 shorts)
+        if !(lut_0 == 0 && _mm256_testz_si256(c0, c0) != 0) {
+            let v0 = core::ptr::read(p.add(0)) as u16 as usize;
+            let v1 = core::ptr::read(p.add(1)) as u16 as usize;
+            let v2 = core::ptr::read(p.add(2)) as u16 as usize;
+            let v3 = core::ptr::read(p.add(3)) as u16 as usize;
+            let v4 = core::ptr::read(p.add(4)) as u16 as usize;
+            let v5 = core::ptr::read(p.add(5)) as u16 as usize;
+            let v6 = core::ptr::read(p.add(6)) as u16 as usize;
+            let v7 = core::ptr::read(p.add(7)) as u16 as usize;
+            let v8 = core::ptr::read(p.add(8)) as u16 as usize;
+            let v9 = core::ptr::read(p.add(9)) as u16 as usize;
+            let v10 = core::ptr::read(p.add(10)) as u16 as usize;
+            let v11 = core::ptr::read(p.add(11)) as u16 as usize;
+            let v12 = core::ptr::read(p.add(12)) as u16 as usize;
+            let v13 = core::ptr::read(p.add(13)) as u16 as usize;
+            let v14 = core::ptr::read(p.add(14)) as u16 as usize;
+            let v15 = core::ptr::read(p.add(15)) as u16 as usize;
+
+            let res0 = _mm256_setr_epi16(
+                *lut_slice.get_unchecked(v0),
+                *lut_slice.get_unchecked(v1),
+                *lut_slice.get_unchecked(v2),
+                *lut_slice.get_unchecked(v3),
+                *lut_slice.get_unchecked(v4),
+                *lut_slice.get_unchecked(v5),
+                *lut_slice.get_unchecked(v6),
+                *lut_slice.get_unchecked(v7),
+                *lut_slice.get_unchecked(v8),
+                *lut_slice.get_unchecked(v9),
+                *lut_slice.get_unchecked(v10),
+                *lut_slice.get_unchecked(v11),
+                *lut_slice.get_unchecked(v12),
+                *lut_slice.get_unchecked(v13),
+                *lut_slice.get_unchecked(v14),
+                *lut_slice.get_unchecked(v15),
+            );
+
+            // write-bypass: only store if translated values differ from current memory
+            let eq0 = _mm256_cmpeq_epi16(c0, res0);
+            if _mm256_movemask_epi8(eq0) as u32 != 0xFFFFFFFF {
+                _mm256_storeu_si256(p as *mut __m256i, res0);
+            }
+        }
+
+        // process chunk 1 (16 shorts)
+        if !(lut_0 == 0 && _mm256_testz_si256(c1, c1) != 0) {
+            let p1 = p.add(16);
+            let v16 = core::ptr::read(p1.add(0)) as u16 as usize;
+            let v17 = core::ptr::read(p1.add(1)) as u16 as usize;
+            let v18 = core::ptr::read(p1.add(2)) as u16 as usize;
+            let v19 = core::ptr::read(p1.add(3)) as u16 as usize;
+            let v20 = core::ptr::read(p1.add(4)) as u16 as usize;
+            let v21 = core::ptr::read(p1.add(5)) as u16 as usize;
+            let v22 = core::ptr::read(p1.add(6)) as u16 as usize;
+            let v23 = core::ptr::read(p1.add(7)) as u16 as usize;
+            let v24 = core::ptr::read(p1.add(8)) as u16 as usize;
+            let v25 = core::ptr::read(p1.add(9)) as u16 as usize;
+            let v26 = core::ptr::read(p1.add(10)) as u16 as usize;
+            let v27 = core::ptr::read(p1.add(11)) as u16 as usize;
+            let v28 = core::ptr::read(p1.add(12)) as u16 as usize;
+            let v29 = core::ptr::read(p1.add(13)) as u16 as usize;
+            let v30 = core::ptr::read(p1.add(14)) as u16 as usize;
+            let v31 = core::ptr::read(p1.add(15)) as u16 as usize;
+
+            let res1 = _mm256_setr_epi16(
+                *lut_slice.get_unchecked(v16),
+                *lut_slice.get_unchecked(v17),
+                *lut_slice.get_unchecked(v18),
+                *lut_slice.get_unchecked(v19),
+                *lut_slice.get_unchecked(v20),
+                *lut_slice.get_unchecked(v21),
+                *lut_slice.get_unchecked(v22),
+                *lut_slice.get_unchecked(v23),
+                *lut_slice.get_unchecked(v24),
+                *lut_slice.get_unchecked(v25),
+                *lut_slice.get_unchecked(v26),
+                *lut_slice.get_unchecked(v27),
+                *lut_slice.get_unchecked(v28),
+                *lut_slice.get_unchecked(v29),
+                *lut_slice.get_unchecked(v30),
+                *lut_slice.get_unchecked(v31),
+            );
+
+            // write-bypass: only store if translated values differ from current memory
+            let eq1 = _mm256_cmpeq_epi16(c1, res1);
+            if _mm256_movemask_epi8(eq1) as u32 != 0xFFFFFFFF {
+                _mm256_storeu_si256(p1 as *mut __m256i, res1);
+            }
+        }
+
+        i += 32;
+    }
+
+    i
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn translate_shorts_lut(
     data: *mut i16,
@@ -894,71 +1023,24 @@ pub unsafe extern "C" fn translate_shorts_lut(
     let slice = core::slice::from_raw_parts_mut(data, len as usize);
     let lut_slice = core::slice::from_raw_parts(lut, 65536);
 
-    let mut i = 0;
-    let len = slice.len();
+    #[cfg(target_arch = "x86_64")]
+    let mut i = if is_x86_feature_detected!("avx2") {
+        unsafe { translate_shorts_lut_avx2(data, len as usize, lut_slice) }
+    } else {
+        0
+    };
 
-    // 16x unrolled loop for maximal CPU pipeline superscalar efficiency
-    while i + 16 <= len {
-        let p = slice.as_mut_ptr().add(i);
+    #[cfg(not(target_arch = "x86_64"))]
+    let mut i = 0usize;
 
-        let v0 = core::ptr::read(p.add(0)) as u16 as usize;
-        let v1 = core::ptr::read(p.add(1)) as u16 as usize;
-        let v2 = core::ptr::read(p.add(2)) as u16 as usize;
-        let v3 = core::ptr::read(p.add(3)) as u16 as usize;
-        let v4 = core::ptr::read(p.add(4)) as u16 as usize;
-        let v5 = core::ptr::read(p.add(5)) as u16 as usize;
-        let v6 = core::ptr::read(p.add(6)) as u16 as usize;
-        let v7 = core::ptr::read(p.add(7)) as u16 as usize;
-        let v8 = core::ptr::read(p.add(8)) as u16 as usize;
-        let v9 = core::ptr::read(p.add(9)) as u16 as usize;
-        let v10 = core::ptr::read(p.add(10)) as u16 as usize;
-        let v11 = core::ptr::read(p.add(11)) as u16 as usize;
-        let v12 = core::ptr::read(p.add(12)) as u16 as usize;
-        let v13 = core::ptr::read(p.add(13)) as u16 as usize;
-        let v14 = core::ptr::read(p.add(14)) as u16 as usize;
-        let v15 = core::ptr::read(p.add(15)) as u16 as usize;
-
-        let r0 = *lut_slice.get_unchecked(v0);
-        let r1 = *lut_slice.get_unchecked(v1);
-        let r2 = *lut_slice.get_unchecked(v2);
-        let r3 = *lut_slice.get_unchecked(v3);
-        let r4 = *lut_slice.get_unchecked(v4);
-        let r5 = *lut_slice.get_unchecked(v5);
-        let r6 = *lut_slice.get_unchecked(v6);
-        let r7 = *lut_slice.get_unchecked(v7);
-        let r8 = *lut_slice.get_unchecked(v8);
-        let r9 = *lut_slice.get_unchecked(v9);
-        let r10 = *lut_slice.get_unchecked(v10);
-        let r11 = *lut_slice.get_unchecked(v11);
-        let r12 = *lut_slice.get_unchecked(v12);
-        let r13 = *lut_slice.get_unchecked(v13);
-        let r14 = *lut_slice.get_unchecked(v14);
-        let r15 = *lut_slice.get_unchecked(v15);
-
-        core::ptr::write(p.add(0), r0);
-        core::ptr::write(p.add(1), r1);
-        core::ptr::write(p.add(2), r2);
-        core::ptr::write(p.add(3), r3);
-        core::ptr::write(p.add(4), r4);
-        core::ptr::write(p.add(5), r5);
-        core::ptr::write(p.add(6), r6);
-        core::ptr::write(p.add(7), r7);
-        core::ptr::write(p.add(8), r8);
-        core::ptr::write(p.add(9), r9);
-        core::ptr::write(p.add(10), r10);
-        core::ptr::write(p.add(11), r11);
-        core::ptr::write(p.add(12), r12);
-        core::ptr::write(p.add(13), r13);
-        core::ptr::write(p.add(14), r14);
-        core::ptr::write(p.add(15), r15);
-
-        i += 16;
-    }
-
-    while i < len {
+    // clean up remaining elements with scalar write-bypass
+    while i < len as usize {
         let p = slice.as_mut_ptr().add(i);
         let v = core::ptr::read(p) as u16 as usize;
-        core::ptr::write(p, *lut_slice.get_unchecked(v));
+        let r = *lut_slice.get_unchecked(v);
+        if r != v as i16 {
+            core::ptr::write(p, r);
+        }
         i += 1;
     }
 }
