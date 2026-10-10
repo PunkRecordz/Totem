@@ -1,5 +1,6 @@
 package org.punkrecordz.totem
 
+import org.punkrecordz.totem.codec.CompositeTagSerializer
 import org.punkrecordz.totem.codec.CompoundProtocol
 import org.punkrecordz.totem.codec.ProtocolRegistry
 import org.punkrecordz.totem.impl.native.NativeRootCompoundTag
@@ -7,7 +8,6 @@ import org.punkrecordz.totem.io.MemoryLayouts
 import org.punkrecordz.totem.io.allocateUninitialized
 import org.punkrecordz.totem.io.compression.Compression
 import org.punkrecordz.totem.io.compression.CompressionType
-import org.punkrecordz.totem.io.memory.OffHeapScratchBuffer
 import org.punkrecordz.totem.io.stream.BinaryTagWriter
 import org.punkrecordz.totem.io.stream.NativeBinaryTagWriter
 import org.punkrecordz.totem.io.stream.NativeByteArrayOutputStream
@@ -111,20 +111,22 @@ object Totem {
             return compression.compress(root.rootSegment, arena)
         }
 
-        val headerSize =
-            MemoryLayouts.BYTE.byteSize() + MemoryLayouts.SHORT.byteSize() + MemoryLayouts.stringByteLength(name)
-        val contentSize = CompoundProtocol.sizeOf(root)
-        val totalSize = headerSize + contentSize
-
         if (compression === CompressionType.NONE) {
+            val headerSize =
+                MemoryLayouts.BYTE.byteSize() + MemoryLayouts.SHORT.byteSize() + MemoryLayouts.stringByteLength(name)
+            val contentSize = CompoundProtocol.sizeOf(root)
+            val totalSize = headerSize + contentSize
+
             val uncompressedSegment = arena.allocateUninitialized(totalSize)
             writeUncompressed(uncompressedSegment, name, root)
             return uncompressedSegment
         }
 
-        val uncompressedSegment = OffHeapScratchBuffer.getSerializationBuffer().acquire(totalSize)
-        writeUncompressed(uncompressedSegment, name, root)
-        return compression.compress(uncompressedSegment, arena)
+        // zero-copy composite serialization for compressed outputs
+        return Arena.ofConfined().use { tempArena ->
+            val slices = CompositeTagSerializer.serialize(name, root, tempArena)
+            compression.compress(slices, arena)
+        }
     }
 
     fun save(
@@ -296,9 +298,11 @@ object Totem {
             return uncompressedSegment
         }
 
-        val uncompressedSegment = OffHeapScratchBuffer.getSerializationBuffer().acquire(totalSize)
-        writeUncompressedTag(uncompressedSegment, tag)
-        return compression.compress(uncompressedSegment, arena)
+        return Arena.ofConfined().use { tempArena ->
+            val uncompressedSegment = tempArena.allocateUninitialized(totalSize)
+            writeUncompressedTag(uncompressedSegment, tag)
+            compression.compress(uncompressedSegment, arena)
+        }
     }
 
     fun saveTag(
