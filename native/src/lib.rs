@@ -54,12 +54,18 @@ unsafe fn decode_varint_shorts_avx2(
 ) -> (usize, usize) {
     use core::arch::x86_64::*;
 
+    let mask_007f = _mm256_set1_epi16(0x007F);
+    let mask_3f80 = _mm256_set1_epi16(0x3F80u16 as i16);
+
+    let mask_007f_128 = _mm_set1_epi16(0x007F);
+    let mask_3f80_128 = _mm_set1_epi16(0x3F80u16 as i16);
+
     while source_offset + 32 <= source.len() && destination_offset + 32 <= destination.len() {
         let chunk = _mm256_loadu_si256(source.as_ptr().add(source_offset) as *const __m256i);
-        let mask = _mm256_movemask_epi8(chunk);
+        let mask = _mm256_movemask_epi8(chunk) as u32;
 
         if mask == 0 {
-            // fast path: all 32 bytes have bit 7 == 0 (1-byte VarInts)
+            // Fast path 1: all 32 bytes are 1-byte VarInts (MSB = 0)
             let low_128 = _mm256_castsi256_si128(chunk);
             let high_128 = _mm256_extracti128_si256(chunk, 1);
 
@@ -72,28 +78,58 @@ unsafe fn decode_varint_shorts_avx2(
 
             source_offset += 32;
             destination_offset += 32;
-        } else {
-            let prefix_ones = mask.trailing_zeros() as usize;
-            if prefix_ones > 0 {
-                // fast path: all bytes before the first MSB=1 are 1-byte VarInts
-                for i in 0..prefix_ones {
-                    *destination.get_unchecked_mut(destination_offset + i) = *source.get_unchecked(source_offset + i) as u16;
-                }
-                source_offset += prefix_ones;
-                destination_offset += prefix_ones;
-            }
+            continue;
+        }
 
-            // decode the multi-byte VarInt at source_offset
-            if source_offset + 4 <= source.len() && destination_offset < destination.len() {
-                let pointer = source.as_ptr().add(source_offset) as *const u32;
-                let packed = u32::from_le(core::ptr::read_unaligned(pointer));
-                let (value, new_src) = decode_single_from_packed(packed, source_offset);
-                *destination.get_unchecked_mut(destination_offset) = value;
-                source_offset = new_src;
-                destination_offset += 1;
-            } else {
-                break;
+        if mask == 0x55555555 {
+            // Fast path 2: all 32 bytes are 16 2-byte VarInts (alternating MSB: 1, 0, 1, 0...)
+            let high_part = _mm256_and_si256(_mm256_srli_epi16(chunk, 1), mask_3f80);
+            let low_part = _mm256_and_si256(chunk, mask_007f);
+            let decoded_shorts = _mm256_or_si256(high_part, low_part);
+
+            let dest_ptr = destination.as_mut_ptr().add(destination_offset) as *mut __m256i;
+            _mm256_storeu_si256(dest_ptr, decoded_shorts);
+
+            source_offset += 32;
+            destination_offset += 16;
+            continue;
+        }
+
+        if (mask & 0xFFFF) == 0x5555 {
+            // Fast path 3: first 16 bytes are 8 2-byte VarInts
+            let low_128 = _mm256_castsi256_si128(chunk);
+            let high_part = _mm_and_si128(_mm_srli_epi16(low_128, 1), mask_3f80_128);
+            let low_part = _mm_and_si128(low_128, mask_007f_128);
+            let decoded_shorts = _mm_or_si128(high_part, low_part);
+
+            let dest_ptr = destination.as_mut_ptr().add(destination_offset) as *mut __m128i;
+            _mm_storeu_si128(dest_ptr, decoded_shorts);
+
+            source_offset += 16;
+            destination_offset += 8;
+            continue;
+        }
+
+        let prefix_ones = mask.trailing_zeros() as usize;
+        if prefix_ones > 0 {
+            // fast path: all bytes before the first MSB=1 are 1-byte VarInts
+            for i in 0..prefix_ones {
+                *destination.get_unchecked_mut(destination_offset + i) = *source.get_unchecked(source_offset + i) as u16;
             }
+            source_offset += prefix_ones;
+            destination_offset += prefix_ones;
+        }
+
+        // decode the multi-byte VarInt at source_offset
+        if source_offset + 4 <= source.len() && destination_offset < destination.len() {
+            let pointer = source.as_ptr().add(source_offset) as *const u32;
+            let packed = u32::from_le(core::ptr::read_unaligned(pointer));
+            let (value, new_src) = decode_single_from_packed(packed, source_offset);
+            *destination.get_unchecked_mut(destination_offset) = value;
+            source_offset = new_src;
+            destination_offset += 1;
+        } else {
+            break;
         }
     }
 
@@ -132,6 +168,16 @@ unsafe fn decode_varint_shorts_swar(
 
             source_offset += 8;
             destination_offset += 8;
+        } else if (packed_64 & 0x8080808080808080) == 0x0080008000800080 && destination_offset + 4 <= destination.len() {
+            let low = packed_64 & 0x007F007F007F007F;
+            let high = (packed_64 >> 1) & 0x3F803F803F803F80;
+            let decoded_64 = low | high;
+
+            let dest_ptr = destination.as_mut_ptr().add(destination_offset) as *mut u64;
+            core::ptr::write_unaligned(dest_ptr, decoded_64.to_le());
+
+            source_offset += 8;
+            destination_offset += 4;
         } else {
             let packed = packed_64 as u32;
             let (value, new_src) = decode_single_from_packed(packed, source_offset);
