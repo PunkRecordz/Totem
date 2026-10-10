@@ -137,6 +137,46 @@ object TotemSys {
         nativeLinker.downcallHandle(symbol, replaceVarIntBytesDescriptor, criticalOption)
     }
 
+    private val translateShortsDescriptor = FunctionDescriptor.ofVoid(
+        ValueLayout.ADDRESS,
+        ValueLayout.JAVA_LONG,
+        ValueLayout.ADDRESS,
+    )
+
+    private val translateShortsMethodHandle by lazy {
+        val symbol = nativeLibrary.find("translate_shorts_lut")
+            .orElseThrow { UnsatisfiedLinkError("Symbol translate_shorts_lut not found in totem-sys native library") }
+        nativeLinker.downcallHandle(symbol, translateShortsDescriptor, criticalOption)
+    }
+
+    private val scanGzipMembersDescriptor = FunctionDescriptor.of(
+        ValueLayout.JAVA_INT,
+        ValueLayout.ADDRESS,
+        ValueLayout.JAVA_LONG,
+        ValueLayout.ADDRESS,
+        ValueLayout.JAVA_INT,
+    )
+
+    private val scanGzipMembersMethodHandle by lazy {
+        val symbol = nativeLibrary.find("scan_gzip_members")
+            .orElseThrow { UnsatisfiedLinkError("Symbol scan_gzip_members not found in totem-sys native library") }
+        nativeLinker.downcallHandle(symbol, scanGzipMembersDescriptor, criticalOption)
+    }
+
+    fun scanGzipMembers(
+        data: MemorySegment,
+        outOffsets: MemorySegment,
+        maxOut: Int,
+    ): Int {
+        return scanGzipMembersMethodHandle.invokeExact(
+            data,
+            data.byteSize(),
+            outOffsets,
+            maxOut,
+        ) as Int
+    }
+
+
     fun decodeVarIntShorts(
         sourceSlice: MemorySegment,
         destinationSlice: MemorySegment,
@@ -254,6 +294,19 @@ object TotemSys {
             replacement,
         ) as Long
     }
+
+    fun translateShorts(
+        dataSlice: MemorySegment,
+        length: Long,
+        lookupTableSlice: MemorySegment,
+    ) {
+        translateShortsMethodHandle.invokeExact(
+            dataSlice,
+            length,
+            lookupTableSlice,
+        )
+    }
+
 
     private fun getPlatformName(): String {
         val operatingSystemName = System.getProperty("os.name").lowercase()

@@ -2,6 +2,7 @@ package org.punkrecordz.totem
 
 import org.punkrecordz.totem.codec.CompoundProtocol
 import org.punkrecordz.totem.codec.ProtocolRegistry
+import org.punkrecordz.totem.impl.native.NativeRootCompoundTag
 import org.punkrecordz.totem.io.MemoryLayouts
 import org.punkrecordz.totem.io.allocateUninitialized
 import org.punkrecordz.totem.io.compression.Compression
@@ -80,8 +81,9 @@ object Totem {
         val contentSegment = nbtSegment.asSlice(headerSize)
 
         val rootTag = CompoundProtocol.read(contentSegment, 0L)
+        val rootCompoundTag = NativeRootCompoundTag(nbtSegment, rootName, rootTag)
 
-        return rootName to rootTag
+        return rootName to rootCompoundTag
     }
 
     private fun detectCompression(segment: MemorySegment): Compression {
@@ -98,6 +100,17 @@ object Totem {
         arena: Arena,
         compression: Compression = CompressionType.NONE,
     ): MemorySegment {
+        // bypass serialization scratch buffer if root tag is already contiguous off-heap
+        if (root is NativeRootCompoundTag && root.rootName == name) {
+            if (compression === CompressionType.NONE) {
+                val uncompressedSegment = arena.allocateUninitialized(root.rootSegment.byteSize())
+                MemorySegment.copy(root.rootSegment, 0L, uncompressedSegment, 0L, root.rootSegment.byteSize())
+                return uncompressedSegment
+            }
+
+            return compression.compress(root.rootSegment, arena)
+        }
+
         val headerSize =
             MemoryLayouts.BYTE.byteSize() + MemoryLayouts.SHORT.byteSize() + MemoryLayouts.stringByteLength(name)
         val contentSize = CompoundProtocol.sizeOf(root)

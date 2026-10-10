@@ -58,42 +58,30 @@ fun ByteView.toVarIntShortArray(
         return view
     }
 
-    val totalBytes = sourceSlice.byteSize()
     val availableCores = Runtime.getRuntime().availableProcessors().coerceIn(1, 16)
-    val targetChunkBytes = totalBytes / availableCores
-
-    // partition byte buffer along VarInt terminal boundaries (byte & 0x80 == 0)
     val byteBoundaries = LongArray(availableCores + 1)
-    byteBoundaries[0] = 0L
-    byteBoundaries[availableCores] = totalBytes
-
-    for (index in 1 until availableCores) {
-        var boundary = minOf(totalBytes, index.toLong() * targetChunkBytes)
-        while (boundary < totalBytes && (sourceSlice.get(ValueLayout.JAVA_BYTE, boundary - 1L).toInt() and 0x80) != 0) {
-            boundary++
-        }
-
-        byteBoundaries[index] = boundary
-    }
-
-    val partitionShortCounts = IntArray(availableCores)
     val partitionShortOffsets = IntArray(availableCores)
-    var totalDecodedShorts = 0
+    val partitionShortCounts = IntArray(availableCores)
 
-    // count terminals in each partition sequentially via fast AVX2 SIMD (<0.2ms total)
-    for (index in 0 until availableCores) {
-        val startByte = byteBoundaries[index]
-        val byteLength = byteBoundaries[index + 1] - startByte
-        val shortCount = if (byteLength <= 0L) {
-            0
-        } else {
-            val chunkSlice = sourceSlice.asSlice(startByte, byteLength)
-            TotemSys.countVarIntTerminals(chunkSlice).toInt()
-        }
+    // partition byte buffer and count terminals across all partitions in a single native SIMD pass
+    val totalDecodedShorts = Arena.ofConfined().use { tempArena ->
+        val byteStartsSegment = tempArena.allocate(ValueLayout.JAVA_LONG, (availableCores + 1).toLong())
+        val shortOffsetsSegment = tempArena.allocate(ValueLayout.JAVA_INT, availableCores.toLong())
+        val shortCountsSegment = tempArena.allocate(ValueLayout.JAVA_INT, availableCores.toLong())
 
-        partitionShortOffsets[index] = totalDecodedShorts
-        partitionShortCounts[index] = shortCount
-        totalDecodedShorts += shortCount
+        val decodedShorts = TotemSys.partitionVarIntStream(
+            sourceSlice,
+            availableCores,
+            byteStartsSegment,
+            shortOffsetsSegment,
+            shortCountsSegment,
+        ).toInt()
+
+        MemorySegment.copy(byteStartsSegment, ValueLayout.JAVA_LONG, 0L, byteBoundaries, 0, availableCores + 1)
+        MemorySegment.copy(shortOffsetsSegment, ValueLayout.JAVA_INT, 0L, partitionShortOffsets, 0, availableCores)
+        MemorySegment.copy(shortCountsSegment, ValueLayout.JAVA_INT, 0L, partitionShortCounts, 0, availableCores)
+
+        decodedShorts
     }
 
     if (totalDecodedShorts != expectedSize) {

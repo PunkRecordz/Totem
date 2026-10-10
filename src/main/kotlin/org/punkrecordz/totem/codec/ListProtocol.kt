@@ -29,6 +29,12 @@ object ListProtocol : TagProtocol<ListTag<Tag>> {
         }
 
         val protocol = ProtocolRegistry.getOrThrow(typeId)
+        val fixedElementSize = protocol.fixedSize
+
+        if (fixedElementSize != null) {
+            return headerSize + (count.toLong() * fixedElementSize)
+        }
+
         var currentOffset = offset + headerSize
 
         repeat(count) {
@@ -46,6 +52,12 @@ object ListProtocol : TagProtocol<ListTag<Tag>> {
     }
 
     override fun write(segment: MemorySegment, offset: Long, tag: ListTag<Tag>): Long {
+        if (tag is NativeListTag) {
+            val totalSize = calculateSize(tag.segment, 0L)
+            MemorySegment.copy(tag.segment, 0L, segment, offset, totalSize)
+            return totalSize
+        }
+
         val elementType = (tag as? ListTag<*>)?.elementType ?: TagType.END
 
         val headerSize = MemoryLayouts.BYTE.byteSize() + MemoryLayouts.INT.byteSize()
@@ -66,13 +78,22 @@ object ListProtocol : TagProtocol<ListTag<Tag>> {
     }
 
     override fun sizeOf(tag: ListTag<Tag>): Long {
+        if (tag is NativeListTag) {
+            return calculateSize(tag.segment, 0L)
+        }
+
         val headerSize = MemoryLayouts.BYTE.byteSize() + MemoryLayouts.INT.byteSize()
         if (tag.isEmpty()) return headerSize
 
-        var elementsSize = 0L
         val elementType = tag.elementType
         val protocol = ProtocolRegistry.getOrThrow(elementType.id)
+        val fixedElementSize = protocol.fixedSize
 
+        if (fixedElementSize != null) {
+            return headerSize + (tag.size.toLong() * fixedElementSize)
+        }
+
+        var elementsSize = 0L
         for (element in tag) {
             elementsSize += protocol.sizeOf(element)
         }

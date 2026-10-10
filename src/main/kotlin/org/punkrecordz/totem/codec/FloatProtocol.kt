@@ -7,6 +7,8 @@ import java.lang.foreign.MemorySegment
 
 object FloatProtocol : TagProtocol<FloatTag> {
 
+    override val fixedSize: Long = 4L
+
     override fun read(segment: MemorySegment, offset: Long): NativeFloatTag {
         return NativeFloatTag(segment.asSlice(offset, 4L))
     }

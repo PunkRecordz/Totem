@@ -44,10 +44,7 @@ object IntArrayProtocol : TagProtocol<IntArrayTag> {
             val intSize = MemoryLayouts.INT.byteSize()
 
             segment.set(MemoryLayouts.INT, offset, array.size)
-            for (index in array.indices) {
-                val elementOffset = offset + intSize + (index.toLong() * intSize)
-                segment.set(MemoryLayouts.INT, elementOffset, array[index])
-            }
+            MemorySegment.copy(array, 0, segment, MemoryLayouts.INT, offset + intSize, array.size)
 
             return intSize + (array.size.toLong() * intSize)
         }

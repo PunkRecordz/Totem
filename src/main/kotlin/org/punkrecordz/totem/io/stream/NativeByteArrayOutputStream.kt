@@ -104,9 +104,7 @@ class NativeByteArrayOutputStream(
 
         ensureCapacity(byteSize)
 
-        for (index in 0 until size) {
-            currentSegment.set(MemoryLayouts.INT, position + index * 4L, elements[index])
-        }
+        MemorySegment.copy(elements, 0, currentSegment, MemoryLayouts.INT, position, size)
 
         position += byteSize
         totalWritten += byteSize
@@ -118,19 +116,27 @@ class NativeByteArrayOutputStream(
 
         ensureCapacity(byteSize)
 
-        for (index in 0 until size) {
-            currentSegment.set(MemoryLayouts.LONG, position + index * 8L, elements[index])
-        }
+        MemorySegment.copy(elements, 0, currentSegment, MemoryLayouts.LONG, position, size)
 
         position += byteSize
         totalWritten += byteSize
     }
 
     fun writeString(text: String) {
-        val encodedBytes = MemoryLayouts.encodeString(text)
+        val characterLength = text.length
+        if (characterLength > 65535) {
+            throw IllegalArgumentException("String character length ($characterLength) exceeds maximum size of 65535 bytes")
+        }
 
-        writeShort(encodedBytes.size.toShort())
-        writeByteArray(encodedBytes)
+        // reserve capacity and write string directly into off-heap memory without heap allocation
+        val byteLength = MemoryLayouts.stringByteLength(text)
+        val totalNeeded = MemoryLayouts.SHORT.byteSize() + byteLength.toLong()
+        ensureCapacity(totalNeeded)
+
+        val writtenBytes = MemoryLayouts.writeString(currentSegment, position, text)
+
+        position += writtenBytes
+        totalWritten += writtenBytes
     }
 
     fun writeSegment(

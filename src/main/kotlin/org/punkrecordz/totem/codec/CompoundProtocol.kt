@@ -43,6 +43,12 @@ object CompoundProtocol : TagProtocol<CompoundTag> {
     }
 
     override fun write(segment: MemorySegment, offset: Long, tag: CompoundTag): Long {
+        if (tag is NativeCompoundTag) {
+            val totalSize = calculateSize(tag.segment, 0L)
+            MemorySegment.copy(tag.segment, 0L, segment, offset, totalSize)
+            return totalSize
+        }
+
         var currentOffset = offset
         val byteSize = MemoryLayouts.BYTE.byteSize()
 
@@ -63,6 +69,10 @@ object CompoundProtocol : TagProtocol<CompoundTag> {
     }
 
     override fun sizeOf(tag: CompoundTag): Long {
+        if (tag is NativeCompoundTag) {
+            return calculateSize(tag.segment, 0L)
+        }
+
         var totalSize = 0L
         val byteSize = MemoryLayouts.BYTE.byteSize()
 

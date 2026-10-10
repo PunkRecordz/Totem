@@ -876,6 +876,203 @@ unsafe fn fill_shorts_avx2(slice: &mut [i16], value: i16) {
     }
 }
 
+/// Translates all 16-bit short integers in-place according to a 65,536-entry lookup table.
+///
+/// Strategy:
+/// Direct 16x unrolled memory accesses across native pointers without intermediate heap allocation.
+/// When combined with multi-core partitioning in Kotlin Panama FFM, this yields multi-gigabyte/sec throughput.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn translate_shorts_lut(
+    data: *mut i16,
+    len: u64,
+    lut: *const i16,
+) {
+    if data.is_null() || len == 0 || lut.is_null() {
+        return;
+    }
+
+    let slice = core::slice::from_raw_parts_mut(data, len as usize);
+    let lut_slice = core::slice::from_raw_parts(lut, 65536);
+
+    let mut i = 0;
+    let len = slice.len();
+
+    // 16x unrolled loop for maximal CPU pipeline superscalar efficiency
+    while i + 16 <= len {
+        let p = slice.as_mut_ptr().add(i);
+
+        let v0 = core::ptr::read(p.add(0)) as u16 as usize;
+        let v1 = core::ptr::read(p.add(1)) as u16 as usize;
+        let v2 = core::ptr::read(p.add(2)) as u16 as usize;
+        let v3 = core::ptr::read(p.add(3)) as u16 as usize;
+        let v4 = core::ptr::read(p.add(4)) as u16 as usize;
+        let v5 = core::ptr::read(p.add(5)) as u16 as usize;
+        let v6 = core::ptr::read(p.add(6)) as u16 as usize;
+        let v7 = core::ptr::read(p.add(7)) as u16 as usize;
+        let v8 = core::ptr::read(p.add(8)) as u16 as usize;
+        let v9 = core::ptr::read(p.add(9)) as u16 as usize;
+        let v10 = core::ptr::read(p.add(10)) as u16 as usize;
+        let v11 = core::ptr::read(p.add(11)) as u16 as usize;
+        let v12 = core::ptr::read(p.add(12)) as u16 as usize;
+        let v13 = core::ptr::read(p.add(13)) as u16 as usize;
+        let v14 = core::ptr::read(p.add(14)) as u16 as usize;
+        let v15 = core::ptr::read(p.add(15)) as u16 as usize;
+
+        let r0 = *lut_slice.get_unchecked(v0);
+        let r1 = *lut_slice.get_unchecked(v1);
+        let r2 = *lut_slice.get_unchecked(v2);
+        let r3 = *lut_slice.get_unchecked(v3);
+        let r4 = *lut_slice.get_unchecked(v4);
+        let r5 = *lut_slice.get_unchecked(v5);
+        let r6 = *lut_slice.get_unchecked(v6);
+        let r7 = *lut_slice.get_unchecked(v7);
+        let r8 = *lut_slice.get_unchecked(v8);
+        let r9 = *lut_slice.get_unchecked(v9);
+        let r10 = *lut_slice.get_unchecked(v10);
+        let r11 = *lut_slice.get_unchecked(v11);
+        let r12 = *lut_slice.get_unchecked(v12);
+        let r13 = *lut_slice.get_unchecked(v13);
+        let r14 = *lut_slice.get_unchecked(v14);
+        let r15 = *lut_slice.get_unchecked(v15);
+
+        core::ptr::write(p.add(0), r0);
+        core::ptr::write(p.add(1), r1);
+        core::ptr::write(p.add(2), r2);
+        core::ptr::write(p.add(3), r3);
+        core::ptr::write(p.add(4), r4);
+        core::ptr::write(p.add(5), r5);
+        core::ptr::write(p.add(6), r6);
+        core::ptr::write(p.add(7), r7);
+        core::ptr::write(p.add(8), r8);
+        core::ptr::write(p.add(9), r9);
+        core::ptr::write(p.add(10), r10);
+        core::ptr::write(p.add(11), r11);
+        core::ptr::write(p.add(12), r12);
+        core::ptr::write(p.add(13), r13);
+        core::ptr::write(p.add(14), r14);
+        core::ptr::write(p.add(15), r15);
+
+        i += 16;
+    }
+
+    while i < len {
+        let p = slice.as_mut_ptr().add(i);
+        let v = core::ptr::read(p) as u16 as usize;
+        core::ptr::write(p, *lut_slice.get_unchecked(v));
+        i += 1;
+    }
+}
+
+/// Scans a multi-member GZIP stream for individual member start offsets using high-throughput AVX2 SIMD.
+/// Writes discovered offsets into `out_offsets` (up to `max_out`) and returns the member count.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn scan_gzip_members(
+    data: *const u8,
+    len: u64,
+    out_offsets: *mut i64,
+    max_out: u32,
+) -> i32 {
+    let len = len as usize;
+    let max_out = max_out as usize;
+    if data.is_null() || len < 18 || out_offsets.is_null() || max_out == 0 {
+        return 0;
+    }
+
+    let slice = core::slice::from_raw_parts(data, len);
+    let mut count = 0;
+    let mut offset = 0;
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        use core::arch::x86_64::*;
+        let target = _mm256_set1_epi8(0x1F as i8);
+
+        while offset + 32 + 18 <= len && count < max_out {
+            let chunk = _mm256_loadu_si256(slice.as_ptr().add(offset) as *const __m256i);
+            let cmp = _mm256_cmpeq_epi8(chunk, target);
+            let mut mask = _mm256_movemask_epi8(cmp) as u32;
+
+            if mask == 0 {
+                offset += 32;
+                continue;
+            }
+
+            while mask != 0 && count < max_out {
+                let trailing = mask.trailing_zeros() as usize;
+                let candidate = offset + trailing;
+
+                if candidate + 18 <= len {
+                    let b1 = *slice.get_unchecked(candidate + 1);
+                    let b2 = *slice.get_unchecked(candidate + 2);
+
+                    if b1 == 0x8B && b2 == 0x08 {
+                        let flg = *slice.get_unchecked(candidate + 3);
+                        if (flg & 0xE0) == 0 {
+                            if candidate == 0 {
+                                *out_offsets.add(count) = 0;
+                                count += 1;
+                            } else {
+                                let isize = u32::from_le_bytes([
+                                    *slice.get_unchecked(candidate - 4),
+                                    *slice.get_unchecked(candidate - 3),
+                                    *slice.get_unchecked(candidate - 2),
+                                    *slice.get_unchecked(candidate - 1),
+                                ]);
+
+                                if isize > 0 {
+                                    *out_offsets.add(count) = candidate as i64;
+                                    count += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                mask &= mask - 1;
+            }
+
+            offset += 32;
+        }
+    }
+
+    // Scalar tail fallback
+    while offset + 18 <= len && count < max_out {
+        let b0 = *slice.get_unchecked(offset);
+        let b1 = *slice.get_unchecked(offset + 1);
+        let b2 = *slice.get_unchecked(offset + 2);
+
+        if b0 == 0x1F && b1 == 0x8B && b2 == 0x08 {
+            let flg = *slice.get_unchecked(offset + 3);
+            if (flg & 0xE0) == 0 {
+                if offset == 0 {
+                    *out_offsets.add(count) = 0;
+                    count += 1;
+                    offset += 10;
+                    continue;
+                }
+
+                let isize = u32::from_le_bytes([
+                    *slice.get_unchecked(offset - 4),
+                    *slice.get_unchecked(offset - 3),
+                    *slice.get_unchecked(offset - 2),
+                    *slice.get_unchecked(offset - 1),
+                ]);
+
+                if isize > 0 {
+                    *out_offsets.add(count) = offset as i64;
+                    count += 1;
+                    offset += 10;
+                    continue;
+                }
+            }
+        }
+
+        offset += 1;
+    }
+
+    count as i32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1023,4 +1220,20 @@ mod tests {
         assert_eq!(result, sample.len() as i64);
         assert_eq!(sample, expected);
     }
+
+    #[test]
+    fn test_translate_shorts_lut() {
+        let mut sample = vec![0i16, 1, 2, 3, 4, 5, 0, 1];
+        let mut lut = vec![0i16; 65536];
+        for i in 0..65536 {
+            lut[i] = i as i16;
+        }
+        lut[0] = 100;
+        lut[1] = 101;
+        unsafe {
+            translate_shorts_lut(sample.as_mut_ptr(), sample.len() as u64, lut.as_ptr());
+        }
+        assert_eq!(sample, vec![100i16, 101, 2, 3, 4, 5, 100, 101]);
+    }
 }
+

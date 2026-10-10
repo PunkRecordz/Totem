@@ -7,6 +7,8 @@ import java.lang.foreign.MemorySegment
 
 object DoubleProtocol : TagProtocol<DoubleTag> {
 
+    override val fixedSize: Long = 8L
+
     override fun read(segment: MemorySegment, offset: Long): NativeDoubleTag {
         return NativeDoubleTag(segment.asSlice(offset, 8L))
     }

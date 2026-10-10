@@ -145,7 +145,72 @@ value class NativeShortView(
         }
     }
 
+    override fun translate(lookupTable: ShortArray) {
+        val elementCount = size.toLong()
+        if (elementCount == 0L || lookupTable.isEmpty()) return
+
+        val payloadSlice = segment.asSlice(HEADER_OFFSET)
+
+        Arena.ofShared().use { tempArena ->
+            val lookupTableSegment = tempArena.allocate(65536L * Short.SIZE_BYTES)
+            val copyCount = minOf(65536, lookupTable.size)
+            MemorySegment.copy(
+                MemorySegment.ofArray(lookupTable),
+                0L,
+                lookupTableSegment,
+                0L,
+                copyCount.toLong() * Short.SIZE_BYTES,
+            )
+
+            // sequential fast path for smaller datasets
+            if (elementCount < PARALLEL_THRESHOLD_ELEMENTS) {
+                TotemSys.translateShorts(
+                    payloadSlice,
+                    elementCount,
+                    lookupTableSegment,
+                )
+                return
+            }
+
+            val availableProcessors = Runtime.getRuntime().availableProcessors().coerceIn(1, 16)
+            val chunkSize = (elementCount + availableProcessors - 1) / availableProcessors
+            val partitionCount = ((elementCount + chunkSize - 1) / chunkSize).toInt()
+            val rawBaseAddress = payloadSlice.address()
+            val rawLutAddress = lookupTableSegment.address()
+
+            val tasks = (0 until partitionCount).map { partitionIndex ->
+                val startOffset = partitionIndex.toLong() * chunkSize
+                val count = minOf(chunkSize, elementCount - startOffset)
+
+                Callable {
+                    val workerSlice = MemorySegment.ofAddress(rawBaseAddress + (startOffset shl 1))
+                        .reinterpret(count shl 1)
+                    val workerLutSlice = MemorySegment.ofAddress(rawLutAddress)
+                        .reinterpret(65536L * Short.SIZE_BYTES)
+
+                    TotemSys.translateShorts(
+                        workerSlice,
+                        count,
+                        workerLutSlice,
+                    )
+                }
+            }
+
+
+            val futures = TotemThreadPool.executor.invokeAll(tasks)
+            for (future in futures) {
+                future.get()
+            }
+        }
+    }
+
+    override fun translate(lookupTable: IntArray) {
+        val shortTable = ShortArray(lookupTable.size) { index -> lookupTable[index].toShort() }
+        translate(shortTable)
+    }
+
     override fun copy(): NativeShortView {
+
         val newSegment = Arena.ofAuto().allocateUninitialized(segment.byteSize())
         MemorySegment.copy(segment, 0L, newSegment, 0L, segment.byteSize())
 

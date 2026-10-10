@@ -3,6 +3,7 @@ package org.punkrecordz.totem.io.compression
 import com.fulcrumgenomics.jlibdeflate.LibdeflateCompressor
 import com.fulcrumgenomics.jlibdeflate.LibdeflateDecompressor
 import org.punkrecordz.totem.concurrent.TotemThreadPool
+import org.punkrecordz.totem.ffi.TotemSys
 import org.punkrecordz.totem.io.ByteBufferInputStream
 import org.punkrecordz.totem.io.allocateUninitialized
 import org.punkrecordz.totem.io.memory.OffHeapScratchBuffer
@@ -17,6 +18,9 @@ import java.util.zip.GZIPInputStream
 
 private val gzipDecompressor = ThreadLocal.withInitial { LibdeflateDecompressor() }
 private val gzipCompressors = ThreadLocal.withInitial { HashMap<Int, LibdeflateCompressor>() }
+private val workerCompressionBuffers = ThreadLocal.withInitial {
+    OffHeapScratchBuffer(initialCapacity = 4L * 1024L * 1024L)
+}
 
 private const val PARALLEL_THRESHOLD_BYTES: Long = 512 * 1024L
 private const val CHUNK_TARGET_SIZE_BYTES: Long = 2 * 1024 * 1024L
@@ -130,13 +134,6 @@ class GzipCompression(val level: Int = 1) : Compression {
         val inputSize = input.byteSize()
         val chunkSize = (inputSize + partitionCount - 1) / partitionCount
 
-        val dummyCompressor = gzipCompressors.get().getOrPut(level) {
-            LibdeflateCompressor(level)
-        }
-        val chunkBound = dummyCompressor.gzipCompressBound(chunkSize.toInt()).toLong()
-        val totalScratchSize = chunkBound * partitionCount
-        val scratchSegment = OffHeapScratchBuffer.getCompressionBuffer().acquire(totalScratchSize)
-
         val tasks = (0 until partitionCount).map { threadIndex ->
             val chunkStart = threadIndex * chunkSize
             val chunkLength = minOf(chunkSize, inputSize - chunkStart)
@@ -147,42 +144,63 @@ class GzipCompression(val level: Int = 1) : Compression {
                 }
 
                 val inputSlice = input.asSlice(chunkStart, chunkLength)
-                val outputSlice = scratchSegment.asSlice(threadIndex * chunkBound, chunkBound)
-
                 val inputBuffer = inputSlice.asByteBuffer()
-                val outputBuffer = outputSlice.asByteBuffer()
 
-                compressor.gzipCompress(inputBuffer, outputBuffer)
+                val scratchBuffer = workerCompressionBuffers.get()
+                val chunkBound = compressor.gzipCompressBound(chunkLength.toInt()).toLong()
+                val initialEstimate = minOf(chunkBound, maxOf(4L * 1024L * 1024L, chunkLength / 4L))
+
+                var currentOutputSegment = scratchBuffer.acquire(initialEstimate)
+                var compressedBytes = compressor.gzipCompress(inputBuffer, currentOutputSegment.asByteBuffer())
+
+                // handle buffer overflow by falling back to maximum theoretical bound
+                if (compressedBytes <= 0) {
+                    inputBuffer.rewind()
+                    currentOutputSegment = scratchBuffer.acquire(chunkBound)
+                    compressedBytes = compressor.gzipCompress(inputBuffer, currentOutputSegment.asByteBuffer())
+
+                    if (compressedBytes <= 0) {
+                        throw IllegalStateException("Failed to compress GZIP chunk of size $chunkLength even with theoretical bound $chunkBound")
+                    }
+                }
+
+                val chunkBytes = ByteArray(compressedBytes)
+                MemorySegment.copy(
+                    currentOutputSegment,
+                    ValueLayout.JAVA_BYTE,
+                    0L,
+                    chunkBytes,
+                    0,
+                    compressedBytes,
+                )
+
+                chunkBytes
             }
         }
 
         val futures = TotemThreadPool.executor.invokeAll(tasks)
-        val chunkSizes = LongArray(partitionCount) { index ->
-            futures[index].get().toLong()
-        }
+        val chunkResults = futures.map { future -> future.get() }
 
         var totalCompressedSize = 0L
-        for (size in chunkSizes) {
-            totalCompressedSize += size
+        for (chunk in chunkResults) {
+            totalCompressedSize += chunk.size
         }
 
         // allocate exactly sized output in caller arena and pack members contiguously
         val output = arena.allocateUninitialized(totalCompressedSize)
         var currentDestinationOffset = 0L
 
-        for (threadIndex in 0 until partitionCount) {
-            val size = chunkSizes[threadIndex]
-            val sourceOffset = threadIndex * chunkBound
-
+        for (chunk in chunkResults) {
             MemorySegment.copy(
-                scratchSegment,
-                sourceOffset,
+                chunk,
+                0,
                 output,
+                ValueLayout.JAVA_BYTE,
                 currentDestinationOffset,
-                size,
+                chunk.size,
             )
 
-            currentDestinationOffset += size
+            currentDestinationOffset += chunk.size
         }
 
         return output
@@ -193,37 +211,92 @@ class GzipCompression(val level: Int = 1) : Compression {
         arena: Arena,
     ): MemorySegment {
         try {
-            val decompressor = gzipDecompressor.get()
-            val inputBuffer = input.asByteBuffer()
+            val scanStart = System.nanoTime()
+            val memberOffsets = scanMemberOffsets(input)
+            val scanEnd = System.nanoTime()
+            val memberCount = memberOffsets.size
 
-            var capacity = maxOf(input.byteSize() * 8L, 4L * 1024L * 1024L)
-            var currentSegment = arena.allocateUninitialized(capacity)
-            var outputBuffer = currentSegment.asByteBuffer()
-
-            while (inputBuffer.hasRemaining()) {
-                if (outputBuffer.remaining() < 2 * 1024 * 1024) {
-                    capacity *= 2L
-                    val newSegment = arena.allocateUninitialized(capacity)
-                    MemorySegment.copy(
-                        currentSegment,
-                        0L,
-                        newSegment,
-                        0L,
-                        outputBuffer.position().toLong(),
-                    )
-
-                    val previousPosition = outputBuffer.position()
-                    currentSegment = newSegment
-                    outputBuffer = currentSegment.asByteBuffer()
-                    outputBuffer.position(previousPosition)
-                }
-
-                decompressor.gzipDecompressEx(inputBuffer, outputBuffer)
+            if (memberCount <= 1) {
+                return decompressRobust(input, arena)
             }
 
-            return currentSegment.asSlice(0L, outputBuffer.position().toLong())
+            val inputSize = input.byteSize()
+            val memberSizes = LongArray(memberCount)
+            var totalUncompressedSize = 0L
+
+            for (index in 0 until memberCount) {
+                val end = if (index + 1 < memberCount) memberOffsets[index + 1] else inputSize
+                val isize = input.get(
+                    ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN),
+                    end - 4L,
+                ).toLong() and 0xFFFFFFFFL
+
+                memberSizes[index] = isize
+                totalUncompressedSize += isize
+            }
+
+            val output = arena.allocateUninitialized(totalUncompressedSize)
+            val memberDestOffsets = LongArray(memberCount)
+            var currentDestinationOffset = 0L
+
+            for (index in 0 until memberCount) {
+                memberDestOffsets[index] = currentDestinationOffset
+                currentDestinationOffset += memberSizes[index]
+            }
+
+            val tasks = (0 until memberCount).map { index ->
+                val start = memberOffsets[index]
+                val end = if (index + 1 < memberCount) memberOffsets[index + 1] else inputSize
+                val inLength = end - start
+                val outOffset = memberDestOffsets[index]
+                val outSize = memberSizes[index]
+
+                Callable {
+                    val decompressor = gzipDecompressor.get()
+                    val inSlice = input.asSlice(start, inLength)
+                    val outSlice = output.asSlice(outOffset, outSize)
+
+                    decompressor.gzipDecompress(
+                        inSlice.asByteBuffer(),
+                        outSlice.asByteBuffer(),
+                        outSize.toInt(),
+                    )
+                }
+            }
+
+            val parStart = System.nanoTime()
+            val futures = TotemThreadPool.executor.invokeAll(tasks)
+            for (future in futures) {
+                future.get()
+            }
+
+            return output
         } catch (_: Exception) {
             return decompressRobust(input, arena)
+        }
+    }
+
+    private fun scanMemberOffsets(input: MemorySegment): LongArray {
+        val maxMembers = 1024
+        Arena.ofConfined().use { tempArena ->
+            val offsetsBuffer = tempArena.allocate(ValueLayout.JAVA_LONG, maxMembers.toLong())
+            val memberCount = TotemSys.scanGzipMembers(input, offsetsBuffer, maxMembers)
+
+            if (memberCount <= 0) {
+                return LongArray(0)
+            }
+
+            val result = LongArray(memberCount)
+            MemorySegment.copy(
+                offsetsBuffer,
+                ValueLayout.JAVA_LONG,
+                0L,
+                result,
+                0,
+                memberCount,
+            )
+
+            return result
         }
     }
 

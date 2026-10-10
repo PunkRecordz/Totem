@@ -1,8 +1,5 @@
 package org.punkrecordz.totem.io
 
-import java.io.ByteArrayOutputStream
-import java.io.DataOutputStream
-import java.io.UTFDataFormatException
 import java.lang.foreign.MemorySegment
 import java.lang.foreign.ValueLayout
 import java.nio.ByteOrder
@@ -99,26 +96,39 @@ object MemoryLayouts {
             throw IllegalArgumentException("String character length ($characterLength) exceeds maximum size of 65535 bytes")
         }
 
-        if (isAsciiWithoutNull(value)) {
-            val result = ByteArray(characterLength)
+        val byteLength = stringByteLength(value)
+        val result = ByteArray(byteLength)
+
+        if (byteLength == characterLength) {
+            // fast path for pure ascii strings
             for (characterIndex in 0 until characterLength) {
                 result[characterIndex] = value[characterIndex].code.toByte()
             }
+
             return result
         }
 
-        val byteArrayOutputStream = ByteArrayOutputStream(characterLength * 2)
-        try {
-            DataOutputStream(byteArrayOutputStream).writeUTF(value)
-        } catch (exception: UTFDataFormatException) {
-            throw IllegalArgumentException(
-                "Encoded string length exceeds maximum size of 65535 bytes: ${exception.message}",
-                exception,
-            )
+        // encode modified utf-8 directly without stream wrapper overhead
+        var byteIndex = 0
+        for (characterIndex in 0 until characterLength) {
+            val codePoint = value[characterIndex].code
+            when {
+                codePoint in 1..0x007F -> {
+                    result[byteIndex++] = codePoint.toByte()
+                }
+                codePoint == 0 || codePoint in 0x0080..0x07FF -> {
+                    result[byteIndex++] = (0xC0 or ((codePoint shr 6) and 0x1F)).toByte()
+                    result[byteIndex++] = (0x80 or (codePoint and 0x3F)).toByte()
+                }
+                else -> {
+                    result[byteIndex++] = (0xE0 or ((codePoint shr 12) and 0x0F)).toByte()
+                    result[byteIndex++] = (0x80 or ((codePoint shr 6) and 0x3F)).toByte()
+                    result[byteIndex++] = (0x80 or (codePoint and 0x3F)).toByte()
+                }
+            }
         }
 
-        val fullBytes = byteArrayOutputStream.toByteArray()
-        return fullBytes.copyOfRange(2, fullBytes.size)
+        return result
     }
 
     fun stringByteLength(value: String): Int {
@@ -127,16 +137,16 @@ object MemoryLayouts {
             throw IllegalArgumentException("String character length ($characterLength) exceeds maximum size of 65535 bytes")
         }
 
-        if (isAsciiWithoutNull(value)) {
-            return characterLength
-        }
-
         var byteLength = characterLength
         for (characterIndex in 0 until characterLength) {
             val codePoint = value[characterIndex].code
             when {
-                codePoint >= 0x0800 -> byteLength += 2
-                codePoint >= 0x0080 || codePoint == 0 -> byteLength += 1
+                codePoint == 0 -> byteLength += 1
+                codePoint < 0x0080 -> {
+                    // standard 1-byte ascii
+                }
+                codePoint < 0x0800 -> byteLength += 1
+                else -> byteLength += 2
             }
         }
 
@@ -154,23 +164,26 @@ object MemoryLayouts {
         }
 
         val shortSize = SHORT.byteSize()
+        val dataOffset = offset + shortSize
 
-        if (isAsciiWithoutNull(value)) {
+        // fast single-pass path: check ascii and write bytes directly off-heap without heap allocation
+        var isPureAscii = true
+        for (characterIndex in 0 until characterLength) {
+            val codePoint = value[characterIndex].code
+            if (codePoint == 0 || codePoint >= 128) {
+                isPureAscii = false
+                break
+            }
+
+            segment.set(BYTE, dataOffset + characterIndex.toLong(), codePoint.toByte())
+        }
+
+        if (isPureAscii) {
             segment.set(SHORT, offset, characterLength.toShort())
-
-            val bytes = value.toByteArray(StandardCharsets.ISO_8859_1)
-            MemorySegment.copy(
-                bytes,
-                0,
-                segment,
-                BYTE,
-                offset + shortSize,
-                characterLength,
-            )
-
             return shortSize + characterLength
         }
 
+        // non-ascii fallback: modified utf-8 encoding
         val encodedBytes = encodeString(value)
         segment.set(SHORT, offset, encodedBytes.size.toShort())
         MemorySegment.copy(
@@ -178,7 +191,7 @@ object MemoryLayouts {
             0,
             segment,
             BYTE,
-            offset + shortSize,
+            dataOffset,
             encodedBytes.size,
         )
 
