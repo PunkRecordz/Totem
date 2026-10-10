@@ -164,66 +164,56 @@ class GzipCompression(val level: Int = 1) : Compression {
             }
         }
 
-        val tasks = chunks.map { chunkSlice ->
-            Callable {
+        val chunkResults = Arena.ofShared().use { scratchArena ->
+            val tasks = chunks.map { chunkSlice ->
                 val compressor = gzipCompressors.get().getOrPut(level) {
                     LibdeflateCompressor(level)
                 }
 
                 val chunkBound = compressor.gzipCompressBound(chunkSlice.byteSize().toInt()).toLong()
+                val chunkScratchSegment = scratchArena.allocateUninitialized(chunkBound)
 
-                val chunkBytes = Arena.ofConfined().use { workerArena ->
-                    val outputSegment = workerArena.allocateUninitialized(chunkBound)
-                    val compressedBytes = compressor.gzipCompress(
+                Callable {
+                    val threadCompressor = gzipCompressors.get().getOrPut(level) {
+                        LibdeflateCompressor(level)
+                    }
+
+                    val compressedBytes = threadCompressor.gzipCompress(
                         chunkSlice.asByteBuffer(),
-                        outputSegment.asByteBuffer(),
+                        chunkScratchSegment.asByteBuffer(),
                     )
 
                     if (compressedBytes <= 0) {
                         throw IllegalStateException("Failed to compress GZIP chunk of size ${chunkSlice.byteSize()}")
                     }
 
-                    val bytes = ByteArray(compressedBytes)
-                    MemorySegment.copy(
-                        outputSegment,
-                        ValueLayout.JAVA_BYTE,
-                        0L,
-                        bytes,
-                        0,
-                        compressedBytes,
-                    )
-                    bytes
+                    chunkScratchSegment.asSlice(0L, compressedBytes.toLong())
                 }
-
-                chunkBytes
             }
+
+            val futures = TotemThreadPool.executor.invokeAll(tasks)
+            val compressedSlices = futures.map { future -> future.get() }
+
+            val totalCompressedSize = compressedSlices.sumOf { slice -> slice.byteSize() }
+            val finalOutput = arena.allocateUninitialized(totalCompressedSize)
+            var currentDestinationOffset = 0L
+
+            for (compressedSlice in compressedSlices) {
+                MemorySegment.copy(
+                    compressedSlice,
+                    0L,
+                    finalOutput,
+                    currentDestinationOffset,
+                    compressedSlice.byteSize(),
+                )
+
+                currentDestinationOffset += compressedSlice.byteSize()
+            }
+
+            finalOutput
         }
 
-        val futures = TotemThreadPool.executor.invokeAll(tasks)
-        val chunkResults = futures.map { future -> future.get() }
-
-        var totalCompressedSize = 0L
-        for (chunk in chunkResults) {
-            totalCompressedSize += chunk.size
-        }
-
-        val output = arena.allocateUninitialized(totalCompressedSize)
-        var currentDestinationOffset = 0L
-
-        for (chunk in chunkResults) {
-            MemorySegment.copy(
-                chunk,
-                0,
-                output,
-                ValueLayout.JAVA_BYTE,
-                currentDestinationOffset,
-                chunk.size,
-            )
-
-            currentDestinationOffset += chunk.size
-        }
-
-        return output
+        return chunkResults
     }
 
     private fun compressSequential(
@@ -252,70 +242,60 @@ class GzipCompression(val level: Int = 1) : Compression {
         val inputSize = input.byteSize()
         val chunkSize = (inputSize + partitionCount - 1) / partitionCount
 
-        val tasks = (0 until partitionCount).map { threadIndex ->
-            val chunkStart = threadIndex * chunkSize
-            val chunkLength = minOf(chunkSize, inputSize - chunkStart)
+        return Arena.ofShared().use { scratchArena ->
+            val tasks = (0 until partitionCount).map { threadIndex ->
+                val chunkStart = threadIndex * chunkSize
+                val chunkLength = minOf(chunkSize, inputSize - chunkStart)
 
-            Callable {
                 val compressor = gzipCompressors.get().getOrPut(level) {
                     LibdeflateCompressor(level)
                 }
 
-                val inputSlice = input.asSlice(chunkStart, chunkLength)
-                val inputBuffer = inputSlice.asByteBuffer()
-
                 val chunkBound = compressor.gzipCompressBound(chunkLength.toInt()).toLong()
+                val chunkScratchSegment = scratchArena.allocateUninitialized(chunkBound)
+                val inputSlice = input.asSlice(chunkStart, chunkLength)
 
-                val chunkBytes = Arena.ofConfined().use { workerArena ->
-                    val outputSegment = workerArena.allocateUninitialized(chunkBound)
-                    val compressedBytes = compressor.gzipCompress(inputBuffer, outputSegment.asByteBuffer())
-
-                    if (compressedBytes <= 0) {
-                        throw IllegalStateException("Failed to compress GZIP chunk of size $chunkLength even with theoretical bound $chunkBound")
+                Callable {
+                    val threadCompressor = gzipCompressors.get().getOrPut(level) {
+                        LibdeflateCompressor(level)
                     }
 
-                    val bytes = ByteArray(compressedBytes)
-                    MemorySegment.copy(
-                        outputSegment,
-                        ValueLayout.JAVA_BYTE,
-                        0L,
-                        bytes,
-                        0,
-                        compressedBytes,
+                    val compressedBytes = threadCompressor.gzipCompress(
+                        inputSlice.asByteBuffer(),
+                        chunkScratchSegment.asByteBuffer(),
                     )
-                    bytes
+
+                    if (compressedBytes <= 0) {
+                        throw IllegalStateException(
+                            "Failed to compress GZIP chunk of size $chunkLength even with theoretical bound $chunkBound",
+                        )
+                    }
+
+                    chunkScratchSegment.asSlice(0L, compressedBytes.toLong())
                 }
-
-                chunkBytes
             }
+
+            val futures = TotemThreadPool.executor.invokeAll(tasks)
+            val compressedSlices = futures.map { future -> future.get() }
+
+            val totalCompressedSize = compressedSlices.sumOf { slice -> slice.byteSize() }
+            val finalOutput = arena.allocateUninitialized(totalCompressedSize)
+            var currentDestinationOffset = 0L
+
+            for (compressedSlice in compressedSlices) {
+                MemorySegment.copy(
+                    compressedSlice,
+                    0L,
+                    finalOutput,
+                    currentDestinationOffset,
+                    compressedSlice.byteSize(),
+                )
+
+                currentDestinationOffset += compressedSlice.byteSize()
+            }
+
+            finalOutput
         }
-
-        val futures = TotemThreadPool.executor.invokeAll(tasks)
-        val chunkResults = futures.map { future -> future.get() }
-
-        var totalCompressedSize = 0L
-        for (chunk in chunkResults) {
-            totalCompressedSize += chunk.size
-        }
-
-        // allocate exactly sized output in caller arena and pack members contiguously
-        val output = arena.allocateUninitialized(totalCompressedSize)
-        var currentDestinationOffset = 0L
-
-        for (chunk in chunkResults) {
-            MemorySegment.copy(
-                chunk,
-                0,
-                output,
-                ValueLayout.JAVA_BYTE,
-                currentDestinationOffset,
-                chunk.size,
-            )
-
-            currentDestinationOffset += chunk.size
-        }
-
-        return output
     }
 
     private fun decompressMultiMember(

@@ -308,7 +308,44 @@ unsafe fn encode_parallel_4(
     }
 }
 
-/// AVX2 encoder processing up to 32 elements at once when elements are < 128.
+/// Helper to attempt encoding 4 elements at once when all 4 are 2-byte VarInts ([128, 16384)).
+/// Returns the new offsets if successful (writes 8 bytes), None otherwise.
+#[inline(always)]
+unsafe fn encode_parallel_4_two_bytes(
+    source: &[u16],
+    source_offset: usize,
+    destination: &mut [u8],
+    destination_offset: usize,
+) -> Option<(usize, usize)> {
+    let pointer = unsafe { source.as_ptr().add(source_offset) } as *const u64;
+    let packed_shorts = u64::from_le(unsafe { core::ptr::read_unaligned(pointer) });
+
+    if (packed_shorts & 0xC000C000C000C000) != 0 {
+        return None;
+    }
+
+    let short_0 = packed_shorts as u16;
+    let short_1 = (packed_shorts >> 16) as u16;
+    let short_2 = (packed_shorts >> 32) as u16;
+    let short_3 = (packed_shorts >> 48) as u16;
+
+    if short_0 >= 128 && short_1 >= 128 && short_2 >= 128 && short_3 >= 128 {
+        let low_seven = packed_shorts & 0x007F007F007F007F;
+        let byte_zero = low_seven | 0x0080008000800080;
+        let high_seven = (packed_shorts >> 7) & 0x007F007F007F007F;
+        let byte_one = high_seven << 8;
+        let encoded = byte_zero | byte_one;
+
+        let destination_pointer = unsafe { destination.as_mut_ptr().add(destination_offset) } as *mut u64;
+        unsafe { core::ptr::write_unaligned(destination_pointer, encoded.to_le()); }
+
+        Some((source_offset + 4, destination_offset + 8))
+    } else {
+        None
+    }
+}
+
+/// AVX2 encoder processing up to 32 elements at once for both 1-byte (< 128) and 2-byte ([128, 16384)) VarInts.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn encode_shorts_varint_avx2(
@@ -320,15 +357,21 @@ unsafe fn encode_shorts_varint_avx2(
     use core::arch::x86_64::*;
 
     let mask_ge_128 = _mm256_set1_epi16(0xFF80u16 as i16);
+    let mask_ge_16384 = _mm256_set1_epi16(0xC000u16 as i16);
+    let all_ones = _mm256_set1_epi32(-1);
+    let mask_127 = _mm256_set1_epi16(127);
+    let mask_7f00 = _mm256_set1_epi16(0x7F00u16 as i16);
+    let mask_007f = _mm256_set1_epi16(0x007F);
+    let mask_0080 = _mm256_set1_epi16(0x0080u16 as i16);
 
     while source_offset + 32 <= source.len() {
         let v0 = _mm256_loadu_si256(source.as_ptr().add(source_offset) as *const __m256i);
         let v1 = _mm256_loadu_si256(source.as_ptr().add(source_offset + 16) as *const __m256i);
 
         let or_combined = _mm256_or_si256(v0, v1);
-        let test = _mm256_testz_si256(or_combined, mask_ge_128);
+        let test_1byte_32 = _mm256_testz_si256(or_combined, mask_ge_128);
 
-        if test != 0 {
+        if test_1byte_32 != 0 {
             // all 32 shorts are < 128 (1-byte VarInts)
             let low_v0 = _mm256_castsi256_si128(v0);
             let high_v0 = _mm256_extracti128_si256(v0, 1);
@@ -344,7 +387,11 @@ unsafe fn encode_shorts_varint_avx2(
 
             source_offset += 32;
             destination_offset += 32;
-        } else if _mm256_testz_si256(v0, mask_ge_128) != 0 {
+            continue;
+        }
+
+        // Fast path 2: v0 is 16 1-byte VarInts (< 128)
+        if _mm256_testz_si256(v0, mask_ge_128) != 0 {
             let low_v0 = _mm256_castsi256_si128(v0);
             let high_v0 = _mm256_extracti128_si256(v0, 1);
             let bytes_0_15 = _mm_packus_epi16(low_v0, high_v0);
@@ -353,11 +400,86 @@ unsafe fn encode_shorts_varint_avx2(
 
             source_offset += 16;
             destination_offset += 16;
-        } else {
-            let value = *source.get_unchecked(source_offset);
-            source_offset += 1;
-            destination_offset = encode_single_branchless(value, destination, destination_offset);
+            continue;
         }
+
+        // Fast path 3: all 32 shorts are in [128, 16384) (2-byte VarInts)
+        let cmp0 = _mm256_cmpgt_epi16(v0, mask_127);
+        let cmp1 = _mm256_cmpgt_epi16(v1, mask_127);
+        let cmp_both = _mm256_and_si256(cmp0, cmp1);
+
+        if _mm256_testz_si256(or_combined, mask_ge_16384) != 0 && _mm256_testc_si256(cmp_both, all_ones) != 0 {
+            let high_part_0 = _mm256_and_si256(_mm256_slli_epi16(v0, 1), mask_7f00);
+            let low_part_0 = _mm256_or_si256(_mm256_and_si256(v0, mask_007f), mask_0080);
+            let encoded_0 = _mm256_or_si256(high_part_0, low_part_0);
+
+            let high_part_1 = _mm256_and_si256(_mm256_slli_epi16(v1, 1), mask_7f00);
+            let low_part_1 = _mm256_or_si256(_mm256_and_si256(v1, mask_007f), mask_0080);
+            let encoded_1 = _mm256_or_si256(high_part_1, low_part_1);
+
+            let dest_ptr = destination.as_mut_ptr().add(destination_offset);
+            _mm256_storeu_si256(dest_ptr as *mut __m256i, encoded_0);
+            _mm256_storeu_si256(dest_ptr.add(32) as *mut __m256i, encoded_1);
+
+            source_offset += 32;
+            destination_offset += 64;
+            continue;
+        }
+
+        // Fast path 4: v0 is 16 2-byte VarInts in [128, 16384)
+        if _mm256_testz_si256(v0, mask_ge_16384) != 0 && _mm256_testc_si256(cmp0, all_ones) != 0 {
+            let high_part_0 = _mm256_and_si256(_mm256_slli_epi16(v0, 1), mask_7f00);
+            let low_part_0 = _mm256_or_si256(_mm256_and_si256(v0, mask_007f), mask_0080);
+            let encoded_0 = _mm256_or_si256(high_part_0, low_part_0);
+
+            let dest_ptr = destination.as_mut_ptr().add(destination_offset);
+            _mm256_storeu_si256(dest_ptr as *mut __m256i, encoded_0);
+
+            source_offset += 16;
+            destination_offset += 32;
+            continue;
+        }
+
+        // Fast path 5: SSE 8-short checks on low half of v0
+        let low_v0 = _mm256_castsi256_si128(v0);
+        let mask_ge_128_128 = _mm_set1_epi16(0xFF80u16 as i16);
+        let mask_ge_16384_128 = _mm_set1_epi16(0xC000u16 as i16);
+        let mask_127_128 = _mm_set1_epi16(127);
+        let all_ones_128 = _mm_set1_epi32(-1);
+
+        if _mm_testz_si128(low_v0, mask_ge_128_128) != 0 {
+            let bytes_0_7 = _mm_packus_epi16(low_v0, _mm_setzero_si128());
+            let dest_ptr = destination.as_mut_ptr().add(destination_offset);
+            let packed_u64 = _mm_cvtsi128_si64(bytes_0_7) as u64;
+            core::ptr::write_unaligned(dest_ptr as *mut u64, packed_u64.to_le());
+
+            source_offset += 8;
+            destination_offset += 8;
+            continue;
+        }
+
+        let cmp_low0 = _mm_cmpgt_epi16(low_v0, mask_127_128);
+        if _mm_testz_si128(low_v0, mask_ge_16384_128) != 0 && _mm_testc_si128(cmp_low0, all_ones_128) != 0 {
+            let mask_7f00_128 = _mm_set1_epi16(0x7F00u16 as i16);
+            let mask_007f_128 = _mm_set1_epi16(0x007F);
+            let mask_0080_128 = _mm_set1_epi16(0x0080u16 as i16);
+
+            let high_part = _mm_and_si128(_mm_slli_epi16(low_v0, 1), mask_7f00_128);
+            let low_part = _mm_or_si128(_mm_and_si128(low_v0, mask_007f_128), mask_0080_128);
+            let encoded = _mm_or_si128(high_part, low_part);
+
+            let dest_ptr = destination.as_mut_ptr().add(destination_offset);
+            _mm_storeu_si128(dest_ptr as *mut __m128i, encoded);
+
+            source_offset += 8;
+            destination_offset += 16;
+            continue;
+        }
+
+        // Fallback for mixed boundary: single element branchless
+        let value = *source.get_unchecked(source_offset);
+        source_offset += 1;
+        destination_offset = encode_single_branchless(value, destination, destination_offset);
     }
 
     (source_offset, destination_offset)
@@ -390,6 +512,11 @@ pub unsafe extern "C" fn encode_shorts_varint(
     while source_offset < safe_end {
         if source_offset + 4 <= safe_end {
             if let Some((new_src, new_dest)) = unsafe { encode_parallel_4(source, source_offset, destination, destination_offset) } {
+                source_offset = new_src;
+                destination_offset = new_dest;
+                continue;
+            }
+            if let Some((new_src, new_dest)) = unsafe { encode_parallel_4_two_bytes(source, source_offset, destination, destination_offset) } {
                 source_offset = new_src;
                 destination_offset = new_dest;
                 continue;
@@ -1235,6 +1362,26 @@ mod tests {
         let mut encoded = vec![0u8; size as usize];
         let written = unsafe { encode_shorts_varint(sample.as_ptr(), sample.len() as u64, encoded.as_mut_ptr()) };
         assert_eq!(size, written);
+
+        let mut decoded = vec![0u16; sample.len()];
+        let read = unsafe { decode_varint_shorts(encoded.as_ptr(), written, decoded.as_mut_ptr(), sample.len() as u32) };
+        assert_eq!(read, written as i64);
+        assert_eq!(sample, decoded);
+    }
+
+    #[test]
+    fn test_encode_shorts_varint_two_bytes_heavy() {
+        let mut sample = Vec::new();
+        for i in 0..50000u16 {
+            sample.push(128 + (i % 16000));
+        }
+
+        let calculated_size = unsafe { varint_encoded_size(sample.as_ptr(), sample.len() as u64) };
+        assert_eq!(calculated_size, 50000 * 2);
+
+        let mut encoded = vec![0u8; calculated_size as usize];
+        let written = unsafe { encode_shorts_varint(sample.as_ptr(), sample.len() as u64, encoded.as_mut_ptr()) };
+        assert_eq!(written, calculated_size);
 
         let mut decoded = vec![0u16; sample.len()];
         let read = unsafe { decode_varint_shorts(encoded.as_ptr(), written, decoded.as_mut_ptr(), sample.len() as u32) };
