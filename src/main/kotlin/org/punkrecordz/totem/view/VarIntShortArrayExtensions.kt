@@ -14,23 +14,6 @@ import java.util.concurrent.Callable
 
 private const val PARALLEL_THRESHOLD_ELEMENTS: Long = 65536L
 
-/**
- * Decodes the VarInt compressed byte data inside this [ByteView] into a zero-allocation off-heap [NativeShortView].
- *
- * Strategy:
- * For large datasets exceeding [PARALLEL_THRESHOLD_ELEMENTS], partitions the source VarInt stream
- * along exact terminal byte boundaries (MSB = 0) and counts terminal markers across partitions using AVX2 SIMD.
- * Once partition bounds and destination offsets are established in sub-millisecond time, worker threads
- * decode disjoint byte slices concurrently directly into the contiguous target [NativeShortView] off-heap segment.
- * By reinterpreting raw off-heap memory addresses, worker threads can safely access segments even when the caller
- * allocated memory inside a thread-confined [Arena], while synchronous completion guarantees memory validity.
- *
- * Performance targets:
- * Sub-5ms VarInt decoding for tens of millions of block states across available hardware threads with zero heap GC.
- *
- * @param expectedSize The number of Short elements expected in the decoded view.
- * @param arena The FFM Arena to allocate the off-heap MemorySegment for the resulting view.
- */
 fun ByteView.toVarIntShortArray(
     expectedSize: Int,
     arena: Arena,
@@ -47,7 +30,6 @@ fun ByteView.toVarIntShortArray(
     val sourceSlice = this.segment.asSlice(MemoryLayouts.INT.byteSize())
     val destinationSlice = view.segment.asSlice(MemoryLayouts.INT.byteSize())
 
-    // sequential fast path for smaller payloads
     if (expectedSize < PARALLEL_THRESHOLD_ELEMENTS || sourceSlice.byteSize() < PARALLEL_THRESHOLD_ELEMENTS) {
         TotemSys.decodeVarIntShorts(
             sourceSlice,
@@ -63,25 +45,45 @@ fun ByteView.toVarIntShortArray(
     val partitionShortOffsets = IntArray(availableCores)
     val partitionShortCounts = IntArray(availableCores)
 
-    // partition byte buffer and count terminals across all partitions in a single native SIMD pass
-    val totalDecodedShorts = Arena.ofConfined().use { tempArena ->
-        val byteStartsSegment = tempArena.allocate(ValueLayout.JAVA_LONG, (availableCores + 1).toLong())
-        val shortOffsetsSegment = tempArena.allocate(ValueLayout.JAVA_INT, availableCores.toLong())
-        val shortCountsSegment = tempArena.allocate(ValueLayout.JAVA_INT, availableCores.toLong())
+    val rawSourceAddress = sourceSlice.address()
+    val rawDestinationAddress = destinationSlice.address()
 
-        val decodedShorts = TotemSys.partitionVarIntStream(
+    Arena.ofConfined().use { tempArena ->
+        val byteStartsSegment = tempArena.allocate(ValueLayout.JAVA_LONG, (availableCores + 1).toLong())
+
+        TotemSys.findVarIntBoundaries(
             sourceSlice,
             availableCores,
             byteStartsSegment,
-            shortOffsetsSegment,
-            shortCountsSegment,
-        ).toInt()
+        )
 
         MemorySegment.copy(byteStartsSegment, ValueLayout.JAVA_LONG, 0L, byteBoundaries, 0, availableCores + 1)
-        MemorySegment.copy(shortOffsetsSegment, ValueLayout.JAVA_INT, 0L, partitionShortOffsets, 0, availableCores)
-        MemorySegment.copy(shortCountsSegment, ValueLayout.JAVA_INT, 0L, partitionShortCounts, 0, availableCores)
+    }
 
-        decodedShorts
+    val countTasks = (0 until availableCores).map { index ->
+        val startByte = byteBoundaries[index]
+        val byteLength = byteBoundaries[index + 1] - startByte
+
+        Callable {
+            if (byteLength > 0L) {
+                val chunkSlice = MemorySegment.ofAddress(rawSourceAddress + startByte)
+                    .reinterpret(byteLength)
+
+                TotemSys.countVarIntTerminals(chunkSlice).toInt()
+            } else {
+                0
+            }
+        }
+    }
+
+    val countFutures = TotemThreadPool.executor.invokeAll(countTasks)
+    var totalDecodedShorts = 0
+
+    for (index in 0 until availableCores) {
+        val count = countFutures[index].get()
+        partitionShortOffsets[index] = totalDecodedShorts
+        partitionShortCounts[index] = count
+        totalDecodedShorts += count
     }
 
     if (totalDecodedShorts != expectedSize) {
@@ -90,10 +92,6 @@ fun ByteView.toVarIntShortArray(
         )
     }
 
-    val rawSourceAddress = sourceSlice.address()
-    val rawDestinationAddress = destinationSlice.address()
-
-    // decode each partition concurrently directly into destination slice
     val decodeTasks = (0 until availableCores).map { index ->
         val startByte = byteBoundaries[index]
         val byteLength = byteBoundaries[index + 1] - startByte
@@ -125,21 +123,6 @@ fun ByteView.toVarIntShortArray(
     return view
 }
 
-/**
- * Encodes this [ShortView] into a VarInt compressed [ByteArrayTag] off-heap.
- *
- * Strategy:
- * For large datasets exceeding [PARALLEL_THRESHOLD_ELEMENTS], partitions the input shorts across
- * available processor cores. First computes the exact encoded byte size for each chunk concurrently
- * using vectorized AVX2 SIMD routines. After a single prefix sum pass, allocates the exact target
- * segment once and encodes all chunks concurrently directly into their final destination slices.
- * Raw memory segment reinterpretation enables cross-thread dispatch even with caller-confined arenas.
- *
- * Performance targets:
- * Sub-5ms VarInt encoding directly into the target [arena] with zero temporary reallocations or memory copies.
- *
- * @param arena The FFM Arena to allocate the off-heap MemorySegment for the resulting ByteArrayTag.
- */
 fun ShortView.toVarIntByteArray(
     arena: Arena,
 ): ByteArrayTag {
@@ -150,7 +133,6 @@ fun ShortView.toVarIntByteArray(
     val sourceSlice = this.segment.asSlice(MemoryLayouts.INT.byteSize())
     val elementCount = this.size.toLong()
 
-    // sequential fast path for smaller payloads
     if (elementCount < PARALLEL_THRESHOLD_ELEMENTS) {
         val payloadSize = TotemSys.calculateVarIntEncodedSize(sourceSlice, elementCount)
         val totalSize = payloadSize + MemoryLayouts.INT.byteSize()
@@ -184,7 +166,6 @@ fun ShortView.toVarIntByteArray(
 
     val rawSourceAddress = sourceSlice.address()
 
-    // calculate partition encoded byte sizes concurrently
     val sizeTasks = (0 until partitionCount).map { index ->
         val start = partitionStartIndices[index]
         val count = partitionElementCounts[index]
@@ -203,7 +184,6 @@ fun ShortView.toVarIntByteArray(
         sizeFutures[index].get()
     }
 
-    // compute output prefix offsets
     val partitionByteOffsets = LongArray(partitionCount)
     var totalPayloadSize = 0L
 
@@ -219,7 +199,6 @@ fun ShortView.toVarIntByteArray(
     val destinationSlice = targetSegment.asSlice(MemoryLayouts.INT.byteSize())
     val rawDestinationAddress = destinationSlice.address()
 
-    // encode partitions concurrently directly into disjoint slices of target segment
     val encodeTasks = (0 until partitionCount).map { index ->
         val start = partitionStartIndices[index]
         val count = partitionElementCounts[index]
@@ -250,104 +229,3 @@ fun ShortView.toVarIntByteArray(
 
     return NativeByteArrayTag(targetSegment)
 }
-
-/**
- * Replaces all occurrences of [target] with [replacement] directly in this [ByteView] VarInt stream in-place.
- *
- * Strategy:
- * When both [target] and [replacement] are single-byte VarInts (< 128), their encoded byte lengths
- * are identically 1 byte. This allows instantaneous, zero-allocation in-place AVX2 transformation
- * without allocating any intermediate ShortArray or NativeShortView buffers.
- * For large buffers exceeding [PARALLEL_THRESHOLD_ELEMENTS], partitions the buffer along VarInt boundaries
- * and executes parallel AVX2 blend instructions across available hardware threads.
- *
- * Trade-offs:
- * If either [target] or [replacement] requires multi-byte VarInt encoding (>= 128), in-place
- * replacement cannot be performed without resizing and returns false, signaling the caller to use
- * the standard decode/encode pipeline.
- *
- * Performance targets:
- * Sub-5ms batch replacement directly on gigabyte-sized off-heap byte streams with zero memory allocation.
- *
- * @param target The short block state value to find and replace.
- * @param replacement The short block state value to substitute.
- * @return True if in-place replacement was performed, false if the values require multi-byte resizing.
- */
-fun ByteView.replaceVarIntInPlace(
-    target: Short,
-    replacement: Short,
-): Boolean {
-    if (target.toInt() !in 0..127 || replacement.toInt() !in 0..127) {
-        return false
-    }
-
-    if (this !is NativeByteArrayTag) {
-        throw IllegalArgumentException("Only native off-heap tags can be modified in-place using native VarInt routines.")
-    }
-
-    val sourceSlice = this.segment.asSlice(MemoryLayouts.INT.byteSize())
-    val totalBytes = sourceSlice.byteSize()
-
-    if (totalBytes == 0L) {
-        return true
-    }
-
-    // sequential fast path for smaller buffers
-    if (totalBytes < PARALLEL_THRESHOLD_ELEMENTS) {
-        TotemSys.replaceVarIntBytesInPlace(
-            sourceSlice,
-            totalBytes,
-            target,
-            replacement,
-        )
-
-        return true
-    }
-
-    val availableCores = Runtime.getRuntime().availableProcessors().coerceIn(1, 16)
-    val targetChunkBytes = totalBytes / availableCores
-
-    // partition byte buffer along VarInt terminal boundaries (byte & 0x80 == 0)
-    val byteBoundaries = LongArray(availableCores + 1)
-    byteBoundaries[0] = 0L
-    byteBoundaries[availableCores] = totalBytes
-
-    for (index in 1 until availableCores) {
-        var boundary = minOf(totalBytes, index.toLong() * targetChunkBytes)
-        while (boundary < totalBytes && (sourceSlice.get(ValueLayout.JAVA_BYTE, boundary - 1L).toInt() and 0x80) != 0) {
-            boundary++
-        }
-
-        byteBoundaries[index] = boundary
-    }
-
-    val rawSourceAddress = sourceSlice.address()
-
-    // transform partitions concurrently in-place using AVX2 SIMD
-    val tasks = (0 until availableCores).map { index ->
-        val startByte = byteBoundaries[index]
-        val byteLength = byteBoundaries[index + 1] - startByte
-
-        Callable {
-            if (byteLength > 0L) {
-                val chunkSlice = MemorySegment.ofAddress(rawSourceAddress + startByte)
-                    .reinterpret(byteLength)
-
-                TotemSys.replaceVarIntBytesInPlace(
-                    chunkSlice,
-                    byteLength,
-                    target,
-                    replacement,
-                )
-            }
-        }
-    }
-
-    val futures = TotemThreadPool.executor.invokeAll(tasks)
-    for (future in futures) {
-        future.get()
-    }
-
-    return true
-}
-
