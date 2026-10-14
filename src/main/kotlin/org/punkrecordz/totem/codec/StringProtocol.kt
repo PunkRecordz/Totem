@@ -8,15 +8,12 @@ import java.lang.foreign.MemorySegment
 object StringProtocol : TagProtocol<StringTag> {
 
     override fun read(segment: MemorySegment, offset: Long): NativeStringTag {
-        val length = segment.get(MemoryLayouts.SHORT, offset).toInt() and 0xFFFF
-        val totalSize = MemoryLayouts.SHORT.byteSize() + length
-
+        val totalSize = calculateSize(segment, offset)
         return NativeStringTag(segment.asSlice(offset, totalSize))
     }
 
     override fun calculateSize(segment: MemorySegment, offset: Long): Long {
         val length = segment.get(MemoryLayouts.SHORT, offset).toInt() and 0xFFFF
-
         return MemoryLayouts.SHORT.byteSize() + length
     }
 

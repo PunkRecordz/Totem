@@ -4,7 +4,6 @@ import org.punkrecordz.totem.tag.ListTag
 import org.punkrecordz.totem.tag.contract.Tag
 import org.punkrecordz.totem.tag.contract.TagKey
 
-
 data class HeapListTag<T : Tag>(
     override val elementType: TagKey,
     val value: MutableList<T> = mutableListOf(),

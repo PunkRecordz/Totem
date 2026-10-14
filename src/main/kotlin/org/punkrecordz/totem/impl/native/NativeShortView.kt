@@ -1,5 +1,6 @@
 package org.punkrecordz.totem.impl.native
 
+import org.punkrecordz.totem.ffi.TotemSys
 import org.punkrecordz.totem.io.MemoryLayouts
 import org.punkrecordz.totem.io.allocateUninitialized
 import org.punkrecordz.totem.view.NativeView
@@ -7,7 +8,7 @@ import org.punkrecordz.totem.view.ShortView
 import java.lang.foreign.Arena
 import java.lang.foreign.MemorySegment
 import java.lang.foreign.ValueLayout
-import java.nio.ByteOrder
+import java.util.Objects
 
 @JvmInline
 value class NativeShortView(
@@ -18,17 +19,82 @@ value class NativeShortView(
         get() = segment.get(MemoryLayouts.INT, 0L)
 
     override operator fun get(index: Int): Short {
+        Objects.checkIndex(index, size)
+
         return segment.get(
             NATIVE_SHORT,
-            MemoryLayouts.INT.byteSize() + (index.toLong() * Short.SIZE_BYTES),
+            SHORT_VIEW_HEADER_OFFSET + (index.toLong() shl 1),
         )
     }
 
     override operator fun set(index: Int, value: Short) {
+        Objects.checkIndex(index, size)
+
         segment.set(
             NATIVE_SHORT,
-            MemoryLayouts.INT.byteSize() + (index.toLong() * Short.SIZE_BYTES),
+            SHORT_VIEW_HEADER_OFFSET + (index.toLong() shl 1),
             value,
+        )
+    }
+
+    override fun replaceAll(
+        target: Short,
+        replacement: Short,
+    ) {
+        val elementCount = size.toLong()
+        if (elementCount == 0L) return
+
+        val payloadSlice = segment.asSlice(SHORT_VIEW_HEADER_OFFSET)
+
+        NativeShortViewSimdOps.executeParallel(elementCount, payloadSlice) { workerSlice, count ->
+            TotemSys.replaceShorts(
+                workerSlice,
+                count,
+                target,
+                replacement,
+            )
+        }
+    }
+
+    override fun fill(value: Short) {
+        val elementCount = size.toLong()
+        if (elementCount == 0L) return
+
+        val payloadSlice = segment.asSlice(SHORT_VIEW_HEADER_OFFSET)
+
+        NativeShortViewSimdOps.executeParallel(elementCount, payloadSlice) { workerSlice, count ->
+            TotemSys.fillShorts(
+                workerSlice,
+                count,
+                value,
+            )
+        }
+    }
+
+    override fun translate(lookupTable: ShortArray) {
+        val elementCount = size.toLong()
+        if (elementCount == 0L || lookupTable.isEmpty()) return
+
+        NativeShortViewSimdOps.translate(
+            payloadSlice = segment.asSlice(SHORT_VIEW_HEADER_OFFSET),
+            elementCount = elementCount,
+            lookupTable = lookupTable,
+        )
+    }
+
+    override fun translate(lookupTable: IntArray) {
+        val shortTable = ShortArray(lookupTable.size) { index -> lookupTable[index].toShort() }
+        translate(shortTable)
+    }
+
+    override fun scanMatchingIndices(shouldIgnore: BooleanArray): IntArray {
+        val elementCount = size.toLong()
+        if (elementCount == 0L || shouldIgnore.isEmpty()) return IntArray(0)
+
+        return NativeShortViewSimdOps.scanMatchingIndices(
+            payloadSlice = segment.asSlice(SHORT_VIEW_HEADER_OFFSET),
+            elementCount = elementCount,
+            shouldIgnore = shouldIgnore,
         )
     }
 
@@ -40,7 +106,8 @@ value class NativeShortView(
     }
 
     companion object {
-        val NATIVE_SHORT: ValueLayout.OfShort = ValueLayout.JAVA_SHORT_UNALIGNED.withOrder(ByteOrder.nativeOrder())
+
+        val NATIVE_SHORT: ValueLayout.OfShort = ValueLayout.JAVA_SHORT
 
         fun of(array: ShortArray, arena: Arena): NativeShortView {
             val byteSize = MemoryLayouts.INT.byteSize() + (array.size.toLong() * MemoryLayouts.SHORT.byteSize())
@@ -66,6 +133,7 @@ value class NativeShortView(
 
             return NativeShortView(segment)
         }
+
     }
 
 }

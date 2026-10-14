@@ -1,48 +1,36 @@
 package org.punkrecordz.totem.ffi
 
 import java.lang.foreign.Arena
-import java.lang.foreign.FunctionDescriptor
-import java.lang.foreign.Linker
 import java.lang.foreign.MemorySegment
-import java.lang.foreign.SymbolLookup
 import java.lang.foreign.ValueLayout
-import java.nio.file.Files
-import java.nio.file.Path
-import java.nio.file.StandardCopyOption
 
 object TotemSys {
 
-    private val nativeLinker = Linker.nativeLinker()
+    fun scanGzipMembers(
+        compressedData: MemorySegment,
+        outputOffsets: MemorySegment,
+        maxMembers: Int,
+    ): Int = TotemSysBindings.scanGzipMembers.invokeExact(
+        compressedData,
+        compressedData.byteSize(),
+        outputOffsets,
+        maxMembers,
+    ) as Int
 
-    private val nativeLibrary: SymbolLookup by lazy {
-        loadNativeLibrary()
-    }
+    fun scanGzipMemberOffsets(
+        compressedData: MemorySegment,
+        maxMembers: Int = 2048,
+    ): LongArray = Arena.ofConfined().use { tempArena ->
+        val offsetsBuffer = tempArena.allocate(ValueLayout.JAVA_LONG, maxMembers.toLong())
+        val memberCount = scanGzipMembers(compressedData, offsetsBuffer, maxMembers)
 
-    private val decodeDescriptor = FunctionDescriptor.of(
-        ValueLayout.JAVA_LONG,
-        ValueLayout.ADDRESS,
-        ValueLayout.JAVA_LONG,
-        ValueLayout.ADDRESS,
-        ValueLayout.JAVA_INT,
-    )
+        if (memberCount <= 0) {
+            return@use LongArray(0)
+        }
 
-    private val encodeDescriptor = FunctionDescriptor.of(
-        ValueLayout.JAVA_LONG,
-        ValueLayout.ADDRESS,
-        ValueLayout.JAVA_LONG,
-        ValueLayout.ADDRESS,
-    )
-
-    private val decodeMethodHandle by lazy {
-        val symbol = nativeLibrary.find("decode_varint_shorts")
-            .orElseThrow { UnsatisfiedLinkError("Symbol decode_varint_shorts not found in totem-sys native library") }
-        nativeLinker.downcallHandle(symbol, decodeDescriptor)
-    }
-
-    private val encodeMethodHandle by lazy {
-        val symbol = nativeLibrary.find("encode_shorts_varint")
-            .orElseThrow { UnsatisfiedLinkError("Symbol encode_shorts_varint not found in totem-sys native library") }
-        nativeLinker.downcallHandle(symbol, encodeDescriptor)
+        LongArray(memberCount).also { offsets ->
+            MemorySegment.copy(offsetsBuffer, ValueLayout.JAVA_LONG, 0L, offsets, 0, memberCount)
+        }
     }
 
     fun decodeVarIntShorts(
@@ -50,7 +38,7 @@ object TotemSys {
         destinationSlice: MemorySegment,
         expectedSize: Int,
     ): Long {
-        val result = decodeMethodHandle.invoke(
+        val result = TotemSysBindings.decodeVarIntShorts.invokeExact(
             sourceSlice,
             sourceSlice.byteSize(),
             destinationSlice,
@@ -78,74 +66,151 @@ object TotemSys {
         sourceSlice: MemorySegment,
         sourceLength: Long,
         destinationSlice: MemorySegment,
+    ): Long = TotemSysBindings.encodeShortsVarInt.invokeExact(
+        sourceSlice,
+        sourceLength,
+        destinationSlice,
+        destinationSlice.byteSize(),
+    ) as Long
+
+    fun calculateVarIntEncodedSize(
+        sourceSlice: MemorySegment,
+        sourceLength: Long,
+    ): Long = TotemSysBindings.varIntEncodedSize.invokeExact(
+        sourceSlice,
+        sourceLength,
+    ) as Long
+
+    fun countVarIntTerminals(
+        sourceSlice: MemorySegment,
+        sourceLength: Long = sourceSlice.byteSize(),
+    ): Long = TotemSysBindings.countVarIntTerminals.invokeExact(
+        sourceSlice,
+        sourceLength,
+    ) as Long
+
+    fun replaceShorts(
+        dataSlice: MemorySegment,
+        length: Long,
+        target: Short,
+        replacement: Short,
+    ) {
+        TotemSysBindings.replaceShorts.invokeExact(dataSlice, length, target, replacement)
+    }
+
+    fun fillShorts(
+        dataSlice: MemorySegment,
+        length: Long,
+        value: Short,
+    ) {
+        TotemSysBindings.fillShorts.invokeExact(dataSlice, length, value)
+    }
+
+    fun translateShorts(
+        dataSlice: MemorySegment,
+        length: Long,
+        lookupTableSlice: MemorySegment,
+    ) {
+        TotemSysBindings.translateShortsLut.invokeExact(dataSlice, length, lookupTableSlice)
+    }
+
+    fun countMatchingShorts(
+        sourceSlice: MemorySegment,
+        elementCount: Long,
+        ignoreLookupTable: MemorySegment,
+    ): Long = TotemSysBindings.countMatchingShorts.invokeExact(
+        sourceSlice,
+        elementCount,
+        ignoreLookupTable,
+    ) as Long
+
+    fun scanMatchingShorts(
+        sourceSlice: MemorySegment,
+        elementCount: Long,
+        baseIndex: Long,
+        ignoreLookupTable: MemorySegment,
+        outputIndices: MemorySegment,
+        maxMatches: Long,
+    ): Long = TotemSysBindings.scanMatchingShorts.invokeExact(
+        sourceSlice,
+        elementCount,
+        baseIndex,
+        ignoreLookupTable,
+        outputIndices,
+        maxMatches,
+    ) as Long
+
+    fun calculateCompoundSize(
+        segment: MemorySegment,
+        offset: Long = 0L,
     ): Long {
-        return encodeMethodHandle.invoke(
-            sourceSlice,
-            sourceLength,
-            destinationSlice,
-        ) as Long
-    }
+        val slice = if (offset == 0L) segment else segment.asSlice(offset)
+        val calculatedSize = TotemSysBindings.calculateCompoundSize.invokeExact(slice, slice.byteSize()) as Long
 
-    private fun getPlatformName(): String {
-        val operatingSystemName = System.getProperty("os.name").lowercase()
-
-        return when {
-            operatingSystemName.contains("win") -> "windows"
-            operatingSystemName.contains("mac") || operatingSystemName.contains("darwin") -> "macos"
-            operatingSystemName.contains("nix") || operatingSystemName.contains("nux") || operatingSystemName.contains("aix") -> "linux"
-            else -> throw UnsupportedOperationException("Unsupported OS: $operatingSystemName")
-        }
-    }
-
-    private fun getArchName(): String {
-        return when (val architectureName = System.getProperty("os.arch").lowercase()) {
-            "amd64", "x86_64", "x64" -> "x86_64"
-            "aarch64", "arm64" -> "aarch64"
-            else -> throw UnsupportedOperationException("Unsupported Architecture: $architectureName")
-        }
-    }
-
-    private fun getLibraryFileName(platform: String): String {
-        return when (platform) {
-            "windows" -> "totem_sys.dll"
-            "macos" -> "libtotem_sys.dylib"
-            "linux" -> "libtotem_sys.so"
-            else -> throw IllegalArgumentException("Unsupported platform mapping: $platform")
-        }
-    }
-
-    private fun loadNativeLibrary(): SymbolLookup {
-        val operatingSystem = getPlatformName()
-        val cpuArchitecture = getArchName()
-        val libraryName = getLibraryFileName(operatingSystem)
-
-        // try local development build path first
-        val localDevelopmentPath = Path.of("native/target/release", libraryName).toAbsolutePath()
-
-        if (Files.exists(localDevelopmentPath)) {
-            try {
-                System.load(localDevelopmentPath.toString())
-                return SymbolLookup.libraryLookup(localDevelopmentPath, Arena.global())
-            } catch (_: Throwable) {
-                // fallback to classpath resource loader
+        if (calculatedSize < 0L) {
+            when (calculatedSize) {
+                -3L -> throw IllegalArgumentException("NBT nesting depth exceeds maximum limit of 512 at offset $offset")
+                -2L -> throw IllegalArgumentException("Malformed NBT compound data at offset $offset")
+                else -> throw IndexOutOfBoundsException("Truncated NBT compound data at offset $offset")
             }
         }
 
-        val resourcePath = "/natives/${operatingSystem}_${cpuArchitecture}/$libraryName"
-        val resourceUrl = TotemSys::class.java.getResource(resourcePath)
-            ?: throw UnsatisfiedLinkError("Native library $libraryName not found in resources at $resourcePath")
+        return calculatedSize
+    }
 
-        val temporaryDirectory = Files.createTempDirectory("totem_sys_natives")
-        val temporaryFile = temporaryDirectory.resolve(libraryName)
-        temporaryFile.toFile().deleteOnExit()
+    fun findCompoundEntry(
+        segment: MemorySegment,
+        offset: Long,
+        keySegment: MemorySegment,
+        keyLength: Short,
+    ): Long {
+        val slice = if (offset == 0L) segment else segment.asSlice(offset)
+        val result = TotemSysBindings.findCompoundEntry.invokeExact(
+            slice,
+            slice.byteSize(),
+            keySegment,
+            keyLength,
+        ) as Long
 
-        resourceUrl.openStream().use { resourceStream ->
-            Files.copy(resourceStream, temporaryFile, StandardCopyOption.REPLACE_EXISTING)
+        if (result < -1L) {
+            when (result) {
+                -3L -> throw IllegalArgumentException("NBT nesting depth exceeds maximum limit of 512 at offset $offset")
+                else -> throw IllegalArgumentException("Malformed NBT compound entry encountered at offset $offset")
+            }
         }
 
-        System.load(temporaryFile.toAbsolutePath().toString())
+        return result
+    }
 
-        return SymbolLookup.libraryLookup(temporaryFile, Arena.global())
+    fun findVarIntBoundaries(
+        sourceSlice: MemorySegment,
+        partitionCount: Int,
+        outputByteStarts: MemorySegment,
+    ) {
+        TotemSysBindings.findVarIntBoundaries.invokeExact(
+            sourceSlice,
+            sourceSlice.byteSize(),
+            partitionCount,
+            outputByteStarts,
+        )
+    }
+
+    fun calculateListSize(
+        segment: MemorySegment,
+        offset: Long = 0L,
+    ): Long {
+        val slice = if (offset == 0L) segment else segment.asSlice(offset)
+        val calculatedSize = TotemSysBindings.calculateListSize.invokeExact(slice, slice.byteSize()) as Long
+
+        if (calculatedSize < 0L) {
+            when (calculatedSize) {
+                -3L -> throw IllegalArgumentException("NBT nesting depth exceeds maximum limit of 512 at offset $offset")
+                -2L -> throw IllegalArgumentException("Malformed NBT list data at offset $offset")
+                else -> throw IndexOutOfBoundsException("Truncated NBT list data at offset $offset")
+            }
+        }
+
+        return calculatedSize
     }
 
 }

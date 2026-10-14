@@ -132,10 +132,10 @@ class IntegrationTests {
                 assertEquals(originalSize, decodedQuerz.size)
 
                 // Verify that all 0 (air) block states were indeed modified to 1 (stone)
-                for (i in decodedQuerz.indices) {
+                for (index in decodedQuerz.indices) {
                     assertTrue(
-                        decodedQuerz[i] != 0.toShort(),
-                        "Cross-validation failed: Found unmodified block state 0 at index $i via Querz NBT."
+                        decodedQuerz[index] != 0.toShort(),
+                        "Cross-validation failed: Found unmodified block state 0 at index $index via Querz NBT.",
                     )
                 }
             }
@@ -147,18 +147,18 @@ class IntegrationTests {
 
     private fun ByteArray.toVarInt(volume: Int): ShortArray {
         val destination = ShortArray(volume)
-        var srcIndex = 0
-        var dstIndex = 0
-        while (srcIndex < this.size && dstIndex < volume) {
+        var sourceIndex = 0
+        var destinationIndex = 0
+        while (sourceIndex < this.size && destinationIndex < volume) {
             var value = 0
             var shift = 0
-            var b: Int
+            var byteValue: Int
             do {
-                b = this[srcIndex++].toInt()
-                value = value or ((b and 0x7F) shl shift)
+                byteValue = this[sourceIndex++].toInt()
+                value = value or ((byteValue and 0x7F) shl shift)
                 shift += 7
-            } while (b and 0x80 != 0)
-            destination[dstIndex++] = value.toShort()
+            } while (byteValue and 0x80 != 0)
+            destination[destinationIndex++] = value.toShort()
         }
         return destination
     }

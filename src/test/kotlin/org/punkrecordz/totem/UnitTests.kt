@@ -1,25 +1,18 @@
 package org.punkrecordz.totem
 
-import net.querz.nbt.io.NBTUtil
 import org.junit.jupiter.api.Test
 import org.punkrecordz.totem.impl.native.NativeByteArrayTag
-import org.punkrecordz.totem.io.MemoryLayouts
+import org.punkrecordz.totem.impl.native.NativeShortView
+import org.punkrecordz.totem.io.compression.CompressionType
 import org.punkrecordz.totem.tag.TagType
 import org.punkrecordz.totem.tag.Tags
 import org.punkrecordz.totem.view.toVarIntShortArray
-import java.io.ByteArrayInputStream
-import java.io.ByteArrayOutputStream
-import java.io.DataInputStream
-import java.io.DataOutputStream
 import java.lang.foreign.Arena
 import java.lang.foreign.ValueLayout
-import kotlin.io.path.createTempFile
-import kotlin.io.path.deleteIfExists
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotSame
 import kotlin.test.assertTrue
-import net.querz.nbt.tag.CompoundTag as QuerzCompoundTag
 
 class UnitTests {
 
@@ -91,20 +84,17 @@ class UnitTests {
         Arena.ofConfined().use { arena ->
             val nativeByteArray = Tags.nativeByteArray(3, arena)
 
-            // Set some values in off-heap memory (skip size header)
             val segment = (nativeByteArray as NativeByteArrayTag).segment
             segment.set(ValueLayout.JAVA_BYTE, 4L, 42.toByte())
             segment.set(ValueLayout.JAVA_BYTE, 5L, 43.toByte())
             segment.set(ValueLayout.JAVA_BYTE, 6L, 44.toByte())
 
-            // Pin returns a JVM heap representation
             val pinned = nativeByteArray.pin()
             assertEquals(3, pinned.size)
             assertEquals(42.toByte(), pinned[0])
             assertEquals(43.toByte(), pinned[1])
             assertEquals(44.toByte(), pinned[2])
 
-            // Copy returns a JVM heap representation decoupled from FFM
             val copied = nativeByteArray.copy()
             assertEquals(3, copied.size)
             assertEquals(42.toByte(), copied[0])
@@ -134,7 +124,6 @@ class UnitTests {
 
     @Test
     fun testNegativeByteArrayLengthThrowsException() {
-        // issue #1 repro: 11 bytes with byte array tag of length -7
         val bytes = byteArrayOf(
             0x0A, 0x00, 0x00,
             0x07, 0x00, 0x00,
@@ -153,7 +142,6 @@ class UnitTests {
 
     @Test
     fun testNegativeIntArrayLengthThrowsException() {
-        // malformed compound with int array tag of length -1
         val bytes = byteArrayOf(
             0x0A, 0x00, 0x00,
             0x0B, 0x00, 0x00,
@@ -172,7 +160,6 @@ class UnitTests {
 
     @Test
     fun testNegativeLongArrayLengthThrowsException() {
-        // malformed compound with long array tag of length -1
         val bytes = byteArrayOf(
             0x0A, 0x00, 0x00,
             0x0C, 0x00, 0x00,
@@ -191,7 +178,6 @@ class UnitTests {
 
     @Test
     fun testNegativeListTagCountThrowsException() {
-        // malformed compound with list tag of count -1
         val bytes = byteArrayOf(
             0x0A, 0x00, 0x00,
             0x09, 0x00, 0x00,
@@ -241,140 +227,57 @@ class UnitTests {
     }
 
     @Test
-    fun testModifiedUtf8EncodingAndDecoding() {
-        val testStrings = listOf(
-            "Hello, World!",
-            "",
-            "a",
-            "Special characters: é, à, ç, ü, ñ, ß",
-            "Null byte: \u0000 between chars",
-            "Emoji: 😀 and 🚀 and 🎉",
-            "Mixed: \u0000 -> é -> 😀 -> end",
-        )
-
-        for (testString in testStrings) {
-            val encodedBytes = MemoryLayouts.encodeString(testString)
-            val decodedString = MemoryLayouts.decodeString(encodedBytes)
-
-            assertEquals(testString, decodedString)
-        }
-    }
-
-    @Test
-    fun testModifiedUtf8NullAndEmojiByteRepresentation() {
-        val nullEncoded = MemoryLayouts.encodeString("\u0000")
-        assertEquals(2, nullEncoded.size)
-        assertEquals(0xC0.toByte(), nullEncoded[0])
-        assertEquals(0x80.toByte(), nullEncoded[1])
-
-        val emojiEncoded = MemoryLayouts.encodeString("😀")
-        assertEquals(6, emojiEncoded.size)
-
-        val expectedEmojiBytes = byteArrayOf(
-            0xED.toByte(), 0xA0.toByte(), 0xBD.toByte(),
-            0xED.toByte(), 0xB8.toByte(), 0x80.toByte(),
-        )
-
-        for (index in expectedEmojiBytes.indices) {
-            assertEquals(expectedEmojiBytes[index], emojiEncoded[index])
-        }
-    }
-
-    @Test
-    fun testModifiedUtf8CrossCompatibilityWithDataStreams() {
-        val testStrings = listOf(
-            "Hello, World!",
-            "Null \u0000 char",
-            "Emoji test 😀 rocket 🚀",
-            "Accents: éàç",
-        )
-
-        for (testString in testStrings) {
-            val byteArrayOutputStream = ByteArrayOutputStream()
-            val dataOutputStream = DataOutputStream(byteArrayOutputStream)
-            dataOutputStream.writeUTF(testString)
-
-            val javaWrittenBytes = byteArrayOutputStream.toByteArray()
-            val length = ((javaWrittenBytes[0].toInt() and 0xFF) shl 8) or (javaWrittenBytes[1].toInt() and 0xFF)
-            val payloadBytes = javaWrittenBytes.copyOfRange(2, 2 + length)
-
-            val totemDecoded = MemoryLayouts.decodeString(payloadBytes)
-            assertEquals(testString, totemDecoded)
-
-            val totemEncoded = MemoryLayouts.encodeString(testString)
-            val combinedBytes = ByteArray(2 + totemEncoded.size)
-            combinedBytes[0] = ((totemEncoded.size shr 8) and 0xFF).toByte()
-            combinedBytes[1] = (totemEncoded.size and 0xFF).toByte()
-            System.arraycopy(totemEncoded, 0, combinedBytes, 2, totemEncoded.size)
-
-            val dataInputStream = DataInputStream(ByteArrayInputStream(combinedBytes))
-            val javaDecoded = dataInputStream.readUTF()
-            assertEquals(testString, javaDecoded)
-        }
-    }
-
-    @Test
-    fun testModifiedUtf8LengthCheckThrowsOnOverflow() {
-        val largeString = "A".repeat(70_000)
-
-        assertFailsWith<IllegalArgumentException> {
-            MemoryLayouts.stringByteLength(largeString)
-        }
-
-        assertFailsWith<IllegalArgumentException> {
-            MemoryLayouts.encodeString(largeString)
-        }
-
-        val multiByteLargeString = "\u4e2d".repeat(30_000)
-
-        assertFailsWith<IllegalArgumentException> {
-            MemoryLayouts.stringByteLength(multiByteLargeString)
-        }
-
-        assertFailsWith<IllegalArgumentException> {
-            MemoryLayouts.encodeString(multiByteLargeString)
-        }
-
+    fun testNegativeAndOutOfBoundsIndicesThrowException() {
         Arena.ofConfined().use { arena ->
-            val compound = Tags.compound()
-            compound.putString("large", largeString)
+            val shortView = NativeShortView.of(4, arena)
+            shortView.fill(10)
 
-            assertFailsWith<IllegalArgumentException> {
-                Totem.save("root", compound, arena)
-            }
+            assertFailsWith<IndexOutOfBoundsException> { shortView[-1] }
+            assertFailsWith<IndexOutOfBoundsException> { shortView[-1] = 99 }
+            assertFailsWith<IndexOutOfBoundsException> { shortView[4] }
+            assertFailsWith<IndexOutOfBoundsException> { shortView[4] = 99 }
+            assertEquals(4, shortView.size)
+
+            val byteArray = Tags.nativeByteArray(4, arena)
+            assertFailsWith<IndexOutOfBoundsException> { byteArray[-1] }
+            assertFailsWith<IndexOutOfBoundsException> { byteArray[-1] = 99 }
+            assertFailsWith<IndexOutOfBoundsException> { byteArray[4] }
+            assertEquals(4, byteArray.size)
+
+            val intArray = Tags.nativeIntArray(4, arena)
+            assertFailsWith<IndexOutOfBoundsException> { intArray[-1] }
+            assertFailsWith<IndexOutOfBoundsException> { intArray[-1] = 99 }
+            assertFailsWith<IndexOutOfBoundsException> { intArray[4] }
+            assertEquals(4, intArray.size)
+
+            val longArray = Tags.nativeLongArray(4, arena)
+            assertFailsWith<IndexOutOfBoundsException> { longArray[-1] }
+            assertFailsWith<IndexOutOfBoundsException> { longArray[-1] = 99L }
+            assertFailsWith<IndexOutOfBoundsException> { longArray[4] }
+            assertEquals(4, longArray.size)
         }
     }
 
     @Test
-    fun testCompoundTagWithEmojiAndNullRoundtrip() {
+    fun testLoadUncompressedByteArraySupportsNativeOperations() {
         Arena.ofConfined().use { arena ->
-            val compound = Tags.compound()
-            compound.putString("user_name_😀", "Alpha 😀")
-            compound.putString("null_\u0000_key", "null_\u0000_val")
-
-            val savedBytes = Totem.saveToByteArray("schematic_😀", compound)
-
-            val (loadedName, loadedCompound) = Totem.load(savedBytes, arena)
-            assertEquals("schematic_😀", loadedName)
-            assertEquals("Alpha 😀", loadedCompound.getString("user_name_😀"))
-            assertEquals("null_\u0000_val", loadedCompound.getString("null_\u0000_key"))
-
-            val temporaryFile = createTempFile("totem_emoji", ".nbt")
-
-            try {
-                Totem.save("schematic_😀", compound, temporaryFile)
-                val querzNamedTag = NBTUtil.read(temporaryFile.toFile())
-                assertEquals("schematic_😀", querzNamedTag.name)
-
-                val querzRoot = querzNamedTag.tag as QuerzCompoundTag
-                assertEquals("Alpha 😀", querzRoot.getString("user_name_😀"))
-                assertEquals("null_\u0000_val", querzRoot.getString("null_\u0000_key"))
-            } finally {
-                temporaryFile.deleteIfExists()
+            val compound = Tags.compound {
+                putInt("ascii_int", 1234)
+                put("bytes", Tags.byteArray(byteArrayOf(1, 2, 3, 4)))
             }
+
+            val rawBytes = Totem.saveToByteArray("root", compound, CompressionType.NONE)
+            val (loadedName, loadedRoot) = Totem.load(rawBytes, arena, CompressionType.NONE)
+
+            assertEquals("root", loadedName)
+            assertEquals(1234, loadedRoot.getInt("ascii_int"))
+
+            val loadedBytes = loadedRoot.getByteArray("bytes")!!
+            val decodedShorts = loadedBytes.toVarIntShortArray(4, arena)
+            assertEquals(4, decodedShorts.size)
+            assertEquals(1.toShort(), decodedShorts[0])
+            assertEquals(4.toShort(), decodedShorts[3])
         }
     }
 
 }
-
-

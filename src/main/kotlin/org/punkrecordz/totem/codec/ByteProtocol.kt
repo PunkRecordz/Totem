@@ -7,6 +7,8 @@ import java.lang.foreign.MemorySegment
 
 object ByteProtocol : TagProtocol<ByteTag> {
 
+    override val fixedSize: Long = 1L
+
     override fun read(segment: MemorySegment, offset: Long): NativeByteTag {
         return NativeByteTag(segment.asSlice(offset, 1L))
     }

@@ -9,10 +9,8 @@ import java.io.IOException
 import java.lang.foreign.Arena
 import java.lang.foreign.MemorySegment
 import java.lang.foreign.ValueLayout
-import java.nio.ByteOrder
 import java.nio.channels.FileChannel
 import java.nio.file.StandardOpenOption
-import java.util.*
 import java.util.concurrent.locks.StampedLock
 
 class AnvilRegionFile(
@@ -20,21 +18,10 @@ class AnvilRegionFile(
     val writeMode: Boolean = false,
 ) : AutoCloseable {
 
-    private companion object {
-        const val SECTOR_SIZE = 4096
-        const val HEADER_SECTORS = 2
-        const val HEADER_SIZE = SECTOR_SIZE * HEADER_SECTORS
-        const val CHUNK_COUNT = 1024
-        const val COMPRESSION_GZIP = 1
-        const val COMPRESSION_DEFLATE = 2
-    }
-
     private val channel: FileChannel
     private val arena: Arena = Arena.ofShared()
     private val mappedSegment: MemorySegment?
-    private val offsets = IntArray(CHUNK_COUNT)
-    private val timestamps = IntArray(CHUNK_COUNT)
-    private val usedSectors = BitSet()
+    private val sectorTable = AnvilSectorTable()
     private val lock: StampedLock? = if (writeMode) StampedLock() else null
 
     @Volatile
@@ -57,98 +44,56 @@ class AnvilRegionFile(
                     StandardOpenOption.WRITE,
                 )
 
-                tempSegment = null
-
-                if (!exists || size < HEADER_SIZE) {
-                    Arena.ofConfined().use { tempArena ->
-                        val headerSegment = tempArena.allocateUninitialized(HEADER_SIZE.toLong())
-                        headerSegment.fill(0.toByte())
-                        tempChannel.write(headerSegment.asByteBuffer(), 0L)
-                    }
-                    usedSectors.set(0, HEADER_SECTORS)
+                if (!exists || size < AnvilSectorTable.HEADER_SIZE) {
+                    sectorTable.initializeEmptyHeader(tempChannel)
                 } else {
-                    loadHeadersFromChannel(tempChannel)
-                    recalculateUsedSectors()
+                    sectorTable.loadFromChannel(tempChannel)
                 }
             } else {
                 tempChannel = FileChannel.open(file.toPath(), StandardOpenOption.READ)
                 val size = tempChannel.size()
 
-                tempSegment = if (size >= HEADER_SIZE) {
+                tempSegment = if (size >= AnvilSectorTable.HEADER_SIZE) {
                     tempChannel.map(FileChannel.MapMode.READ_ONLY, 0L, size, arena)
                 } else {
                     null
                 }
 
-                loadHeadersFromMapping(tempSegment)
-                recalculateUsedSectors()
+                sectorTable.loadFromMapping(tempSegment)
             }
 
             channel = tempChannel
             mappedSegment = tempSegment
         } catch (exception: Throwable) {
-            try {
-                tempChannel?.close()
-            } catch (closeException: Throwable) {
-                exception.addSuppressed(closeException)
-            }
-            try {
-                arena.close()
-            } catch (closeException: Throwable) {
-                exception.addSuppressed(closeException)
-            }
+            runCatching { tempChannel?.close() }.onFailure { exception.addSuppressed(it) }
+            runCatching { arena.close() }.onFailure { exception.addSuppressed(it) }
             throw exception
         }
     }
 
     fun listChunks(): List<ChunkCoordinate> {
         if (!writeMode) {
-            if (closed) {
-                throw IllegalStateException("AnvilRegionFile is closed.")
-            }
-
-            return readChunksFromOffsets()
+            check(!closed) { "AnvilRegionFile is closed." }
+            return sectorTable.listPresentChunks()
         }
 
         val activeLock = lock!!
         val stamp = activeLock.tryOptimisticRead()
         val isClosed = closed
-        val chunkList = readChunksFromOffsets()
+        val chunkList = sectorTable.listPresentChunks()
 
         if (!activeLock.validate(stamp)) {
             val readStamp = activeLock.readLock()
             try {
-                if (closed) {
-                    throw IllegalStateException("AnvilRegionFile is closed.")
-                }
-
-                return readChunksFromOffsets()
+                check(!closed) { "AnvilRegionFile is closed." }
+                return sectorTable.listPresentChunks()
             } finally {
                 activeLock.unlockRead(readStamp)
             }
         }
 
-        if (isClosed) {
-            throw IllegalStateException("AnvilRegionFile is closed.")
-        }
-
+        check(!isClosed) { "AnvilRegionFile is closed." }
         return chunkList
-    }
-
-    private fun readChunksFromOffsets(): List<ChunkCoordinate> {
-        val chunks = ArrayList<ChunkCoordinate>()
-        offsets.forEachIndexed { index, entry ->
-            if (entry != 0) {
-                chunks.add(
-                    ChunkCoordinate(
-                        x = index % 32,
-                        z = index / 32,
-                    ),
-                )
-            }
-        }
-
-        return chunks
     }
 
     fun readChunk(
@@ -157,20 +102,14 @@ class AnvilRegionFile(
         targetArena: Arena,
     ): Pair<String, CompoundTag>? {
         if (!writeMode) {
-            if (closed) {
-                throw IllegalStateException("AnvilRegionFile is closed.")
-            }
-
+            check(!closed) { "AnvilRegionFile is closed." }
             return performReadChunk(globalX, globalZ, targetArena)
         }
 
         val activeLock = lock!!
         val stamp = activeLock.readLock()
         try {
-            if (closed) {
-                throw IllegalStateException("AnvilRegionFile is closed.")
-            }
-
+            check(!closed) { "AnvilRegionFile is closed." }
             return performReadChunk(globalX, globalZ, targetArena)
         } finally {
             activeLock.unlockRead(stamp)
@@ -182,53 +121,36 @@ class AnvilRegionFile(
         globalZ: Int,
         targetArena: Arena,
     ): Pair<String, CompoundTag>? {
-        val offsetEntry = offsets[getChunkIndex(globalX, globalZ)]
+        val offsetEntry = sectorTable.offsets[AnvilSectorTable.getChunkIndex(globalX, globalZ)]
         if (offsetEntry == 0) return null
 
         val sectorOffset = offsetEntry ushr 8
         val sectorCount = offsetEntry and 0xFF
 
-        if (sectorOffset < HEADER_SECTORS || sectorCount == 0) return null
-        val fileOffset = sectorOffset.toLong() * SECTOR_SIZE
+        if (sectorOffset < AnvilSectorTable.HEADER_SECTORS || sectorCount == 0) return null
+        val fileOffset = sectorOffset.toLong() * AnvilSectorTable.SECTOR_SIZE
+        val sectorBytes = sectorCount.toLong() * AnvilSectorTable.SECTOR_SIZE
 
-        return if (mappedSegment != null) {
-            val chunkSegment = mappedSegment.asSlice(fileOffset, sectorCount.toLong() * SECTOR_SIZE)
-            val length = chunkSegment.get(ValueLayout.JAVA_INT.withOrder(ByteOrder.BIG_ENDIAN), 0L)
-
-            if (length > sectorCount * SECTOR_SIZE || length <= 1) return null
-
-            val compressionType = chunkSegment.get(ValueLayout.JAVA_BYTE, 4L).toInt()
-            val compressedSegment = chunkSegment.asSlice(5L, length - 1L)
-
-            val compression = when (compressionType) {
-                COMPRESSION_GZIP -> CompressionType.GZIP
-                COMPRESSION_DEFLATE -> CompressionType.ZLIB
-                else -> throw IOException("Unknown Anvil chunk compression type: $compressionType")
-            }
-
-            Totem.load(compressedSegment, targetArena, compression)
+        val chunkSegment = if (mappedSegment != null) {
+            mappedSegment.asSlice(fileOffset, sectorBytes)
         } else {
-            val sectorBytes = sectorCount.toLong() * SECTOR_SIZE
             val tempBuffer = targetArena.allocateUninitialized(sectorBytes)
-
             channel.read(tempBuffer.asByteBuffer(), fileOffset)
-
-            val length = tempBuffer.get(ValueLayout.JAVA_INT.withOrder(ByteOrder.BIG_ENDIAN), 0L)
-            if (length > sectorBytes || length <= 1) return null
-
-            val compressionType = tempBuffer.get(ValueLayout.JAVA_BYTE, 4L).toInt()
-            val compressedSegment = targetArena.allocateUninitialized(length - 1L)
-
-            MemorySegment.copy(tempBuffer, 5L, compressedSegment, 0L, length - 1L)
-
-            val compression = when (compressionType) {
-                COMPRESSION_GZIP -> CompressionType.GZIP
-                COMPRESSION_DEFLATE -> CompressionType.ZLIB
-                else -> throw IOException("Unknown Anvil chunk compression type: $compressionType")
-            }
-
-            Totem.load(compressedSegment, targetArena, compression)
+            tempBuffer
         }
+
+        val length = chunkSegment.get(AnvilSectorTable.BIG_ENDIAN_INT, 0L)
+        if (length > sectorBytes || length <= 1) return null
+
+        val compressionType = chunkSegment.get(ValueLayout.JAVA_BYTE, 4L).toInt()
+        val compression = when (compressionType) {
+            AnvilSectorTable.COMPRESSION_GZIP -> CompressionType.GZIP
+            AnvilSectorTable.COMPRESSION_DEFLATE -> CompressionType.ZLIB
+            else -> throw IOException("Unknown Anvil chunk compression type: $compressionType")
+        }
+
+        val compressedSegment = chunkSegment.asSlice(5L, length - 1L)
+        return Totem.load(compressedSegment, targetArena, compression)
     }
 
     fun writeChunk(
@@ -241,26 +163,24 @@ class AnvilRegionFile(
             "Cannot write chunk on a read-only AnvilRegionFile mapping."
         }
 
-        val chunkIndex = getChunkIndex(globalX, globalZ)
+        val chunkIndex = AnvilSectorTable.getChunkIndex(globalX, globalZ)
 
         Arena.ofConfined().use { tempArena ->
             val compressedSegment = Totem.save(rootName, tag, tempArena, CompressionType.ZLIB)
             val totalDataSize = compressedSegment.byteSize().toInt() + 5
-            val requiredSectors = (totalDataSize + SECTOR_SIZE - 1) / SECTOR_SIZE
+            val requiredSectors = (totalDataSize + AnvilSectorTable.SECTOR_SIZE - 1) / AnvilSectorTable.SECTOR_SIZE
 
-            if (requiredSectors > 255) {
-                throw IllegalArgumentException("Chunk size $totalDataSize bytes exceeds maximum sectors size limit of 255 sectors.")
+            require(requiredSectors <= 255) {
+                "Chunk size $totalDataSize bytes exceeds maximum sectors size limit of 255 sectors."
             }
 
             val dataLength = totalDataSize - 4
-            val paddingSize = (requiredSectors * SECTOR_SIZE) - totalDataSize
+            val paddingSize = (requiredSectors * AnvilSectorTable.SECTOR_SIZE) - totalDataSize
             val totalWriteSize = totalDataSize + paddingSize
 
             val writeSegment = tempArena.allocateUninitialized(totalWriteSize.toLong())
-
-            writeSegment.set(ValueLayout.JAVA_INT.withOrder(ByteOrder.BIG_ENDIAN), 0L, dataLength)
-            writeSegment.set(ValueLayout.JAVA_BYTE, 4L, COMPRESSION_DEFLATE.toByte())
-
+            writeSegment.set(AnvilSectorTable.BIG_ENDIAN_INT, 0L, dataLength)
+            writeSegment.set(ValueLayout.JAVA_BYTE, 4L, AnvilSectorTable.COMPRESSION_DEFLATE.toByte())
             MemorySegment.copy(compressedSegment, 0L, writeSegment, 5L, compressedSegment.byteSize())
 
             if (paddingSize > 0) {
@@ -270,102 +190,17 @@ class AnvilRegionFile(
             val activeLock = lock!!
             val stamp = activeLock.writeLock()
             try {
-                if (closed) {
-                    throw IllegalStateException("AnvilRegionFile is closed.")
-                }
+                check(!closed) { "AnvilRegionFile is closed." }
 
-                val oldEntry = offsets[chunkIndex]
-
-                if (oldEntry != 0) {
-                    val oldOffset = oldEntry ushr 8
-                    val oldCount = oldEntry and 0xFF
-                    usedSectors.clear(oldOffset, oldOffset + oldCount)
-                }
-
-                val newSectorOffset = findFreeSectors(requiredSectors)
-                val fileOffset = newSectorOffset.toLong() * SECTOR_SIZE
+                val newSectorOffset = sectorTable.allocateChunkSectors(chunkIndex, requiredSectors)
+                val fileOffset = newSectorOffset.toLong() * AnvilSectorTable.SECTOR_SIZE
 
                 channel.write(writeSegment.asByteBuffer(), fileOffset)
-
-                val newEntry = (newSectorOffset shl 8) or requiredSectors
-                val newTimestamp = (System.currentTimeMillis() / 1000).toInt()
-
-                offsets[chunkIndex] = newEntry
-                timestamps[chunkIndex] = newTimestamp
-
-                usedSectors.set(newSectorOffset, newSectorOffset + requiredSectors)
-
-                val headerSegment = tempArena.allocateUninitialized(8)
-                headerSegment.set(ValueLayout.JAVA_INT.withOrder(ByteOrder.BIG_ENDIAN), 0L, newEntry)
-                headerSegment.set(ValueLayout.JAVA_INT.withOrder(ByteOrder.BIG_ENDIAN), 4L, newTimestamp)
-
-                channel.write(headerSegment.asSlice(0, 4).asByteBuffer(), chunkIndex.toLong() * 4L)
-                channel.write(
-                    headerSegment.asSlice(4, 4).asByteBuffer(),
-                    SECTOR_SIZE.toLong() + chunkIndex.toLong() * 4L
-                )
+                sectorTable.writeChunkHeaderEntry(channel, tempArena, chunkIndex)
             } finally {
                 activeLock.unlockWrite(stamp)
             }
         }
-    }
-
-    private fun findFreeSectors(required: Int): Int {
-        var startCheck = HEADER_SECTORS
-        while (true) {
-            val nextClear = usedSectors.nextClearBit(startCheck)
-            val nextSet = usedSectors.nextSetBit(nextClear)
-
-            if (nextSet == -1) return nextClear
-            if (nextSet - nextClear >= required) return nextClear
-
-            startCheck = nextSet
-        }
-    }
-
-    private fun loadHeadersFromMapping(segment: MemorySegment?) {
-        if (segment == null) return
-
-        val intLayout = ValueLayout.JAVA_INT.withOrder(ByteOrder.BIG_ENDIAN)
-
-        for (index in 0 until CHUNK_COUNT) {
-            offsets[index] = segment.get(intLayout, index * 4L)
-            timestamps[index] = segment.get(intLayout, SECTOR_SIZE + index * 4L)
-        }
-    }
-
-    private fun loadHeadersFromChannel(activeChannel: FileChannel) {
-        val size = activeChannel.size()
-
-        if (size < HEADER_SIZE) return
-
-        Arena.ofConfined().use { tempArena ->
-            val headerSegment = tempArena.allocateUninitialized(HEADER_SIZE.toLong())
-            activeChannel.read(headerSegment.asByteBuffer(), 0L)
-
-            val intLayout = ValueLayout.JAVA_INT.withOrder(ByteOrder.BIG_ENDIAN)
-
-            for (index in 0 until CHUNK_COUNT) {
-                offsets[index] = headerSegment.get(intLayout, index * 4L)
-                timestamps[index] = headerSegment.get(intLayout, SECTOR_SIZE + index * 4L)
-            }
-        }
-    }
-
-    private fun recalculateUsedSectors() {
-        usedSectors.clear()
-        usedSectors.set(0, HEADER_SECTORS)
-        offsets.forEach { entry ->
-            if (entry != 0) {
-                val start = entry ushr 8
-                val count = entry and 0xFF
-                usedSectors.set(start, start + count)
-            }
-        }
-    }
-
-    private fun getChunkIndex(chunkX: Int, chunkZ: Int): Int {
-        return ((chunkX % 32 + 32) % 32) + ((chunkZ % 32 + 32) % 32) * 32
     }
 
     override fun close() {
@@ -376,25 +211,7 @@ class AnvilRegionFile(
                 if (closed) return
                 closed = true
 
-                Arena.ofConfined().use { tempArena ->
-                    val headerSegment = tempArena.allocateUninitialized(HEADER_SIZE.toLong())
-
-                    for (index in 0 until CHUNK_COUNT) {
-                        headerSegment.set(
-                            ValueLayout.JAVA_INT.withOrder(ByteOrder.BIG_ENDIAN),
-                            index * 4L,
-                            offsets[index]
-                        )
-                        headerSegment.set(
-                            ValueLayout.JAVA_INT.withOrder(ByteOrder.BIG_ENDIAN),
-                            SECTOR_SIZE + index * 4L,
-                            timestamps[index]
-                        )
-                    }
-
-                    channel.write(headerSegment.asByteBuffer(), 0L)
-                }
-
+                sectorTable.flushAllHeaders(channel)
                 arena.close()
                 channel.close()
             } finally {

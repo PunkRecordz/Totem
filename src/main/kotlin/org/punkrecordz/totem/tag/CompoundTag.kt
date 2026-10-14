@@ -1,6 +1,15 @@
 package org.punkrecordz.totem.tag
 
-import org.punkrecordz.totem.impl.heap.*
+import org.punkrecordz.totem.impl.heap.HeapByteArrayTag
+import org.punkrecordz.totem.impl.heap.HeapByteTag
+import org.punkrecordz.totem.impl.heap.HeapDoubleTag
+import org.punkrecordz.totem.impl.heap.HeapFloatTag
+import org.punkrecordz.totem.impl.heap.HeapIntArrayTag
+import org.punkrecordz.totem.impl.heap.HeapIntTag
+import org.punkrecordz.totem.impl.heap.HeapLongArrayTag
+import org.punkrecordz.totem.impl.heap.HeapLongTag
+import org.punkrecordz.totem.impl.heap.HeapShortTag
+import org.punkrecordz.totem.impl.heap.HeapStringTag
 import org.punkrecordz.totem.tag.contract.PinnableTag
 import org.punkrecordz.totem.tag.contract.Tag
 import org.punkrecordz.totem.tag.contract.TagKey
@@ -8,7 +17,6 @@ import org.punkrecordz.totem.tag.contract.TagKey
 interface CompoundTag : Tag, PinnableTag<CompoundTag>, MutableMap<String, Tag> {
 
     override val key: TagKey get() = TagType.COMPOUND
-
 
     fun getNumber(key: String): Number? {
         val tag = this[key] as? NumericTag<*>

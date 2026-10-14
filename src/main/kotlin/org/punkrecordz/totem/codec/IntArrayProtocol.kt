@@ -9,22 +9,12 @@ import java.lang.foreign.MemorySegment
 object IntArrayProtocol : TagProtocol<IntArrayTag> {
 
     override fun read(segment: MemorySegment, offset: Long): NativeIntArrayTag {
-        val length = segment.get(MemoryLayouts.INT, offset)
-
-        // validate payload length
-        if (length < 0) {
-            throw IllegalArgumentException("IntArrayTag length must be non-negative, but was $length at offset $offset")
-        }
-
-        val totalSize = MemoryLayouts.INT.byteSize() + (length.toLong() * MemoryLayouts.INT.byteSize())
-
+        val totalSize = calculateSize(segment, offset)
         return NativeIntArrayTag(segment.asSlice(offset, totalSize))
     }
 
     override fun calculateSize(segment: MemorySegment, offset: Long): Long {
         val length = segment.get(MemoryLayouts.INT, offset)
-
-        // validate payload length
         if (length < 0) {
             throw IllegalArgumentException("IntArrayTag length must be non-negative, but was $length at offset $offset")
         }
@@ -44,10 +34,7 @@ object IntArrayProtocol : TagProtocol<IntArrayTag> {
             val intSize = MemoryLayouts.INT.byteSize()
 
             segment.set(MemoryLayouts.INT, offset, array.size)
-            for (index in array.indices) {
-                val elementOffset = offset + intSize + (index.toLong() * intSize)
-                segment.set(MemoryLayouts.INT, elementOffset, array[index])
-            }
+            MemorySegment.copy(array, 0, segment, MemoryLayouts.INT, offset + intSize, array.size)
 
             return intSize + (array.size.toLong() * intSize)
         }

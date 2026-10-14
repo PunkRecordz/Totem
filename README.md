@@ -9,58 +9,58 @@
   <img src="https://img.shields.io/badge/License-MIT-blue?style=flat-square" alt="License" />
 </p>
 
-Totem is a high-performance, zero-allocation Named Binary Tag (NBT) library for Kotlin/JVM. It leverages Project Panama's native capabilities and a native Rust companion library (`totem-sys`) to achieve maximum throughput with minimal garbage collection pressure. Requires JDK 24 or higher.
+Totem is an off-heap Named Binary Tag (NBT) library for Kotlin/JVM built on Java's Foreign Function & Memory API (JEP 454) and a native Rust library (`totem-sys`). Requires JDK 24+.
 
 ## Key Features
 
-* **Off-Heap Execution**: Traverse and query huge NBT data trees without generating GC pressure.
-* **High-Volume Translations**: Accelerated native VarInt decoders specifically designed for massive block manipulations.
-* **Direct Anvil Operations**: Fast, memory-mapped read and write operations on Minecraft region files (`.mca`).
-* **Kotlin DSL**: An expressive, tree-based builder API for constructing clean NBT trees.
+* **Off-Heap NBT**: Read and traverse large NBT trees directly from native memory without allocating on the JVM heap.
+* **Header Inspection (`Totem.inspect`)**: Read root metadata (`DataVersion`, dimensions, author) from compressed schematics in microseconds without decompressing block arrays.
+* **Native Block Codecs**: Rust VarInt (`toVarIntShortArray`) and 64-bit bit-packing (`BlockDataCodec`) codecs with AVX2 palette lookup translation (`ShortView.translate`).
+* **Anvil Region Files**: Memory-mapped `.mca` chunk reading and writing (`AnvilRegionFile`).
+* **Kotlin Builders**: Tree-based (`Tags.compound`) and streaming (`Totem.write`) builders.
 
-## Technical Architecture
-
-Totem is engineered to minimize memory copying, JVM heap garbage collection, and FFI transition overheads when dealing with the [Minecraft NBT format](https://minecraft.wiki/w/NBT_format) and [Anvil Region files](https://minecraft.wiki/w/Anvil_file_format).
+## Architecture
 
 ### Off-Heap Layouts & Panama FFM
-Instead of parsing the binary payload into intermediate Java objects, Totem maps NBT structures directly onto raw memory segments using Java's [Foreign Function & Memory (FFM) API (JEP 454)](https://openjdk.org/jeps/454).
+Instead of deserializing binary payloads into heap objects, Totem maps NBT structures over raw `MemorySegment` slices using the [Foreign Function & Memory API (JEP 454)](https://openjdk.org/jeps/454).
 
 > [!NOTE]
-> **Flyweight Pattern**: Off-heap tags are modeled as Kotlin [inline value classes](https://kotlinlang.org/docs/inline-classes.html) (`@JvmInline value class`) wrapping a single `MemorySegment`. At runtime, the wrapper is completely erased by the compiler, leaving only the 64-bit reference to the off-heap segment.
+> **Flyweight Value Classes**: Off-heap tags are Kotlin [inline value classes](https://kotlinlang.org/docs/inline-classes.html) (`@JvmInline value class`) wrapping a `MemorySegment`. At runtime, the wrapper is erased to a 64-bit segment reference.
 > 
-> **Zero-Copy Slicing**: Nested structures are accessed by slicing (`segment.asSlice(...)`) rather than copying data onto the JVM heap.
+> **Zero-Copy Slicing**: Nested tags are read via `segment.asSlice(...)` without copying bytes to the JVM heap.
 
-### Rust-FFI VarInt Decoders
-Minecraft block data relies heavily on [VarInt and VarLong encoding](https://minecraft.wiki/w/Java_Edition_protocol/Packets#VarInt_and_VarLong). Rather than decoding them on the JVM:
-* **[SWAR (SIMD Within A Register)](https://en.wikipedia.org/wiki/SWAR) Parallelization**: The native `totem-sys` Rust library uses bitwise operations to decode up to four 1-byte VarInts in parallel inside a single register load.
-* **Batched Crossings**: JVM-to-Native transitions are minimized by passing raw pointers and lengths to Rust, processing millions of elements in a single native downcall.
+### Native Codecs & Parallel I/O
+* **VarInt & Palette Translation**: `totem-sys` decodes and encodes VarInt streams and translates 16-bit block palettes via lookup tables using AVX2 on `x86_64` and 64-bit [SWAR](https://en.wikipedia.org/wiki/SWAR) fallbacks.
+* **Bit-Packing (`BlockDataCodec`)**: Packs and unpacks both padded (1.16+ Anvil) and spanning (`precise = true`, 1.13–1.15 Anvil & Litematica) 64-bit `LongArray` block states directly off-heap, splitting volumes `>= 262,144` blocks across worker threads.
+* **Composite Serialization & Multi-Member GZIP**: During serialization, native array payloads `>= 1 MB` are passed by slice reference rather than copied, and payloads `>= 256 KB` are compressed and decompressed in parallel across CPU cores.
 
 > [!TIP]
-> **16-Bit Optimization (RAM Savings)**: Because a schematic block palette mathematically cannot exceed 65,536 unique states (fitting within an unsigned short), Totem decodes VarInt data directly into 16-bit `Short` arrays instead of standard 32-bit `Int` arrays. This is a deliberate design trade-off that halves the memory footprint (saving 50% RAM), prioritizing speed and memory efficiency. If full 32-bit VarInt range is needed for other structures in the future, a dedicated method can be added.
+> **16-Bit Block States**: Since block palettes fit within 65,536 states, Totem decodes block data into unsigned 16-bit `Short` views rather than 32-bit `Int` arrays, cutting memory usage and bandwidth in half.
 
 ## Performance Benchmark
 
-In an end-to-end NBT pipeline test (loading a compressed schematic of 44 million blocks (`18578.schem`), parsing it, modifying block IDs in a volume, and serializing/saving back to a GZIP file):
+End-to-end NBT pipeline (loading a compressed schematic of 44 million blocks (`18578.schem`), replacing block IDs across the volume, and saving back to a GZIP file):
 
-| Library | Avg Time / Operation | Performance |
+| Library / Pipeline | Avg Time / Operation | Performance vs Querz |
 | :--- | :--- | :--- |
-| **Querz NBT** (Standard Java NBT) | 1,216.59 ms | Baseline |
-| **Totem (FFM + Rust)** | **216.40 ms** | **5.62x Faster** |
+| **Querz NBT** (Standard Java NBT) | 1,797.60 ms | Baseline |
+| **Totem 1.0.2** | 325.79 ms | 5.52x Faster |
+| **Totem 2.0.0** | **92.90 ms** | **19.35x Faster** |
 
 *Measured on JDK 24 (HotSpot 64-Bit Server VM).*
 
-### Real-World Schematic Conversion Impact (1 Billion Blocks)
+### 1 Billion Blocks Schematic Conversion
 
-The screenshots below show the CLI execution times when downgrading a massive schematic containing **1,003,979,130 blocks** from version 1.21.6 to 1.18:
+CLI execution times when downgrading a **1,003,979,130-block** schematic (`2141x245x1914`, `18,535` Tile Entities) from 1.21.6 to 1.18:
 
-* **Without Totem** (Standard Heap NBT): Loading and conversion took `7.76s`, and saving the file took `17.95s` (Total: **~25.71 seconds**).
-* **With Totem** (Panama FFM + Rust): The entire load, conversion, and save pipeline completed in **`5.30 seconds`** (a **4.85x speedup**).
-
-#### Without Totem (Standard Heap NBT)
+#### Without Totem — Standard Heap NBT (`25.71s`: `7.76s` load/convert + `17.95s` save)
 ![Without Totem](assets/without-totem.png)
 
-#### With Totem (Panama FFM + Rust)
-![With Totem](assets/with-totem.png)
+#### With Totem 1.0.2 (`5.30s` — `4.85x` faster)
+![With Totem 1.0.2](assets/with-totem.png)
+
+#### With Totem 2.0.0 (`1.69s` — `15.21x` faster)
+![With Totem 2.0.0](assets/with-totem-v2.gif)
 
 ## Dependency
 
@@ -78,7 +78,7 @@ repositories {
 }
 
 dependencies {
-    implementation("org.punkrecordz:totem:1.0.2")
+    implementation("org.punkrecordz:totem:2.0.0")
 }
 ```
 
@@ -97,6 +97,20 @@ Arena.ofConfined().use { arena ->
         val version = data.getInt("DataVersion")
         println("Loaded '$name' (DataVersion: $version)")
     }
+}
+```
+
+### Inspecting Schematic Metadata Without Full Decompression
+```kotlin
+import java.lang.foreign.Arena
+import org.punkrecordz.totem.Totem
+import java.nio.file.Path
+
+Arena.ofConfined().use { arena ->
+    val (_, rootTag) = Totem.inspect(Path.of("massive.schem"), arena)
+    val dataVersion = rootTag.getInt("DataVersion")
+    val width = rootTag.getShort("Width")
+    println("Schematic DataVersion=$dataVersion, Width=$width")
 }
 ```
 
@@ -130,6 +144,29 @@ Totem.write(Path.of("output.dat")) {
         string("Name", "Steve")
         double("Health", 20.0)
     }
+}
+```
+
+### Bit-Packing Chunk Sections & Litematica Regions
+```kotlin
+import java.lang.foreign.Arena
+import org.punkrecordz.totem.codec.BlockDataCodec
+import org.punkrecordz.totem.view.toBitPackedLongArray
+import org.punkrecordz.totem.view.toBitPackedShortArray
+
+// Zero-copy off-heap unpacking from a LongArrayTag (e.g. Anvil 16x16x16 section)
+val blockStates: ShortArray = BlockDataCodec.unpackShorts(
+    packed = blockStatesTag,
+    bitsPerEntry = 5,
+    count = 4096,
+    precise = false, // false = 1.16+ padded, true = 1.13-1.15 & Litematica spanning
+)
+
+// Or full off-heap ShortView pipeline for large Litematica regions
+Arena.ofConfined().use { arena ->
+    val unpackedView = blockStatesTag.toBitPackedShortArray(volume, bitsPerEntry, arena, precise = true)
+    unpackedView.translate(paletteLookupTable)
+    val repackedTag = unpackedView.toBitPackedLongArray(newBitsPerEntry, arena, precise = true)
 }
 ```
 

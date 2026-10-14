@@ -1,5 +1,6 @@
 package org.punkrecordz.totem.view
 
+import org.punkrecordz.totem.concurrent.TotemThreadPool
 import org.punkrecordz.totem.ffi.TotemSys
 import org.punkrecordz.totem.impl.native.NativeByteArrayTag
 import org.punkrecordz.totem.impl.native.NativeShortView
@@ -8,20 +9,15 @@ import org.punkrecordz.totem.io.allocateUninitialized
 import org.punkrecordz.totem.tag.ByteArrayTag
 import java.lang.foreign.Arena
 import java.lang.foreign.MemorySegment
+import java.lang.foreign.ValueLayout
+import java.util.concurrent.Callable
 
-/**
- * Decodes the VarInt compressed byte data inside this [ByteView] into a zero-allocation off-heap [ShortView].
- *
- * To avoid any JVM heap allocations and maintain optimal performance, the decoding loop is
- * directly delegated to the native totem-sys Rust library.
- *
- * @param expectedSize The number of Short elements expected in the decoded view.
- * @param arena The FFM Arena to allocate the off-heap MemorySegment for the resulting view.
- */
+private const val PARALLEL_THRESHOLD_ELEMENTS: Long = 65536L
+
 fun ByteView.toVarIntShortArray(
     expectedSize: Int,
     arena: Arena,
-): ShortView {
+): NativeShortView {
     if (this !is NativeByteArrayTag) {
         throw IllegalArgumentException("Only native off-heap tags can be decoded using native VarInt translation.")
     }
@@ -31,31 +27,102 @@ fun ByteView.toVarIntShortArray(
         arena,
     )
 
-    val sourceSlice = this.segment.asSlice(4L)
-    val destinationSlice = view.segment.asSlice(4L)
+    val sourceSlice = this.segment.asSlice(MemoryLayouts.INT.byteSize())
+    val destinationSlice = view.segment.asSlice(MemoryLayouts.INT.byteSize())
 
-    TotemSys.decodeVarIntShorts(
-        sourceSlice,
-        destinationSlice,
-        expectedSize,
-    )
+    if (expectedSize < PARALLEL_THRESHOLD_ELEMENTS || sourceSlice.byteSize() < PARALLEL_THRESHOLD_ELEMENTS) {
+        TotemSys.decodeVarIntShorts(
+            sourceSlice,
+            destinationSlice,
+            expectedSize,
+        )
+
+        return view
+    }
+
+    val availableCores = Runtime.getRuntime().availableProcessors().coerceIn(1, 16)
+    val byteBoundaries = LongArray(availableCores + 1)
+    val partitionShortOffsets = IntArray(availableCores)
+    val partitionShortCounts = IntArray(availableCores)
+
+    val rawSourceAddress = sourceSlice.address()
+    val rawDestinationAddress = destinationSlice.address()
+
+    Arena.ofConfined().use { tempArena ->
+        val byteStartsSegment = tempArena.allocate(ValueLayout.JAVA_LONG, (availableCores + 1).toLong())
+
+        TotemSys.findVarIntBoundaries(
+            sourceSlice,
+            availableCores,
+            byteStartsSegment,
+        )
+
+        MemorySegment.copy(byteStartsSegment, ValueLayout.JAVA_LONG, 0L, byteBoundaries, 0, availableCores + 1)
+    }
+
+    val countTasks = (0 until availableCores).map { index ->
+        val startByte = byteBoundaries[index]
+        val byteLength = byteBoundaries[index + 1] - startByte
+
+        Callable {
+            if (byteLength > 0L) {
+                val chunkSlice = MemorySegment.ofAddress(rawSourceAddress + startByte)
+                    .reinterpret(byteLength)
+
+                TotemSys.countVarIntTerminals(chunkSlice).toInt()
+            } else {
+                0
+            }
+        }
+    }
+
+    val countFutures = TotemThreadPool.executor.invokeAll(countTasks)
+    var totalDecodedShorts = 0
+
+    for (index in 0 until availableCores) {
+        val count = countFutures[index].get()
+        partitionShortOffsets[index] = totalDecodedShorts
+        partitionShortCounts[index] = count
+        totalDecodedShorts += count
+    }
+
+    if (totalDecodedShorts != expectedSize) {
+        throw IllegalArgumentException(
+            "Incomplete VarInt data: expected $expectedSize elements, but buffer contained $totalDecodedShorts VarInt values.",
+        )
+    }
+
+    val decodeTasks = (0 until availableCores).map { index ->
+        val startByte = byteBoundaries[index]
+        val byteLength = byteBoundaries[index + 1] - startByte
+        val startShort = partitionShortOffsets[index]
+        val shortCount = partitionShortCounts[index]
+
+        Callable {
+            if (shortCount > 0) {
+                val chunkSourceSlice = MemorySegment.ofAddress(rawSourceAddress + startByte)
+                    .reinterpret(byteLength)
+                val chunkDestinationSlice = MemorySegment.ofAddress(
+                    rawDestinationAddress + (startShort.toLong() * Short.SIZE_BYTES),
+                ).reinterpret(shortCount.toLong() * Short.SIZE_BYTES)
+
+                TotemSys.decodeVarIntShorts(
+                    chunkSourceSlice,
+                    chunkDestinationSlice,
+                    shortCount,
+                )
+            }
+        }
+    }
+
+    val decodeFutures = TotemThreadPool.executor.invokeAll(decodeTasks)
+    for (future in decodeFutures) {
+        future.get()
+    }
 
     return view
 }
 
-/**
- * Encodes this [ShortView] into a VarInt compressed [ByteArrayTag] off-heap.
- *
- * Since the size of the VarInt compressed output depends on the actual block IDs, it
- * cannot be known before encoding. To prevent off-heap memory leaks or wastage in
- * long-lived arenas, we encode the data in a temporary confined arena of maximum possible
- * size. Once encoding is done, we copy only the exact payload to the destination [arena]
- * and immediately free the temporary workspace.
- *
- * This ensures single-pass encoding speed with zero long-term memory overhead.
- *
- * @param arena The FFM Arena to allocate the off-heap MemorySegment for the resulting ByteArrayTag.
- */
 fun ShortView.toVarIntByteArray(
     arena: Arena,
 ): ByteArrayTag {
@@ -63,26 +130,102 @@ fun ShortView.toVarIntByteArray(
         throw IllegalArgumentException("Only NativeShortView is supported for native VarInt encoding.")
     }
 
-    val maxPossibleSize = size.toLong() * 3L + MemoryLayouts.INT.byteSize() + 8L
+    val sourceSlice = this.segment.asSlice(MemoryLayouts.INT.byteSize())
+    val elementCount = this.size.toLong()
 
-    return Arena.ofConfined().use { tempArena ->
-        val tempSegment = tempArena.allocateUninitialized(maxPossibleSize)
-        val sourceSlice = this.segment.asSlice(4L)
-        val destinationSlice = tempSegment.asSlice(4L)
+    if (elementCount < PARALLEL_THRESHOLD_ELEMENTS) {
+        val payloadSize = TotemSys.calculateVarIntEncodedSize(sourceSlice, elementCount)
+        val totalSize = payloadSize + MemoryLayouts.INT.byteSize()
 
-        val payloadSize = TotemSys.encodeShortsVarInt(
+        val targetSegment = arena.allocateUninitialized(totalSize)
+        targetSegment.set(MemoryLayouts.INT, 0L, payloadSize.toInt())
+
+        val destinationSlice = targetSegment.asSlice(MemoryLayouts.INT.byteSize())
+        TotemSys.encodeShortsVarInt(
             sourceSlice,
-            this.size.toLong(),
+            elementCount,
             destinationSlice,
         )
 
-        tempSegment.set(MemoryLayouts.INT, 0L, payloadSize.toInt())
-
-        val exactSize = payloadSize + MemoryLayouts.INT.byteSize()
-        val finalSegment = arena.allocateUninitialized(exactSize)
-
-        MemorySegment.copy(tempSegment, 0L, finalSegment, 0L, exactSize)
-
-        NativeByteArrayTag(finalSegment)
+        return NativeByteArrayTag(targetSegment)
     }
+
+    val availableCores = Runtime.getRuntime().availableProcessors().coerceIn(1, 16)
+    val chunkSize = (elementCount + availableCores - 1) / availableCores
+    val partitionCount = ((elementCount + chunkSize - 1) / chunkSize).toInt()
+
+    val partitionStartIndices = LongArray(partitionCount)
+    val partitionElementCounts = LongArray(partitionCount)
+
+    for (index in 0 until partitionCount) {
+        val start = index.toLong() * chunkSize
+        val count = minOf(chunkSize, elementCount - start)
+        partitionStartIndices[index] = start
+        partitionElementCounts[index] = count
+    }
+
+    val rawSourceAddress = sourceSlice.address()
+
+    val sizeTasks = (0 until partitionCount).map { index ->
+        val start = partitionStartIndices[index]
+        val count = partitionElementCounts[index]
+
+        Callable {
+            val partitionSlice = MemorySegment.ofAddress(
+                rawSourceAddress + (start * Short.SIZE_BYTES),
+            ).reinterpret(count * Short.SIZE_BYTES)
+
+            TotemSys.calculateVarIntEncodedSize(partitionSlice, count)
+        }
+    }
+
+    val sizeFutures = TotemThreadPool.executor.invokeAll(sizeTasks)
+    val partitionByteSizes = LongArray(partitionCount) { index ->
+        sizeFutures[index].get()
+    }
+
+    val partitionByteOffsets = LongArray(partitionCount)
+    var totalPayloadSize = 0L
+
+    for (index in 0 until partitionCount) {
+        partitionByteOffsets[index] = totalPayloadSize
+        totalPayloadSize += partitionByteSizes[index]
+    }
+
+    val totalSize = totalPayloadSize + MemoryLayouts.INT.byteSize()
+    val targetSegment = arena.allocateUninitialized(totalSize)
+    targetSegment.set(MemoryLayouts.INT, 0L, totalPayloadSize.toInt())
+
+    val destinationSlice = targetSegment.asSlice(MemoryLayouts.INT.byteSize())
+    val rawDestinationAddress = destinationSlice.address()
+
+    val encodeTasks = (0 until partitionCount).map { index ->
+        val start = partitionStartIndices[index]
+        val count = partitionElementCounts[index]
+        val destinationOffset = partitionByteOffsets[index]
+        val destinationLength = partitionByteSizes[index]
+
+        Callable {
+            val partitionSourceSlice = MemorySegment.ofAddress(
+                rawSourceAddress + (start * Short.SIZE_BYTES),
+            ).reinterpret(count * Short.SIZE_BYTES)
+
+            val partitionDestinationSlice = MemorySegment.ofAddress(
+                rawDestinationAddress + destinationOffset,
+            ).reinterpret(destinationLength)
+
+            TotemSys.encodeShortsVarInt(
+                partitionSourceSlice,
+                count,
+                partitionDestinationSlice,
+            )
+        }
+    }
+
+    val encodeFutures = TotemThreadPool.executor.invokeAll(encodeTasks)
+    for (future in encodeFutures) {
+        future.get()
+    }
+
+    return NativeByteArrayTag(targetSegment)
 }

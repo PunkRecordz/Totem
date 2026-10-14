@@ -23,18 +23,21 @@ fun ArrayView.contentEquals(other: ArrayView): Boolean {
     }
 }
 
+private fun NativeView.nativePayloadEquals(
+    other: NativeView,
+    byteCount: Long,
+): Boolean = this.segment.asSlice(4L, byteCount).mismatch(other.segment.asSlice(4L, byteCount)) == -1L
+
 fun ByteView.contentEquals(other: ByteView): Boolean {
     if (this === other) return true
     if (size != other.size) return false
 
     if (this is NativeView && other is NativeView) {
-        val bytes = size.toLong()
-
-        return this.segment.asSlice(4L, bytes).mismatch(other.segment.asSlice(4L, bytes)) == -1L
+        return this.nativePayloadEquals(other, size.toLong())
     }
 
-    for (i in 0 until size) {
-        if (this[i] != other[i]) return false
+    for (index in 0 until size) {
+        if (this[index] != other[index]) return false
     }
 
     return true
@@ -45,13 +48,11 @@ fun ShortView.contentEquals(other: ShortView): Boolean {
     if (size != other.size) return false
 
     if (this is NativeView && other is NativeView) {
-        val bytes = size.toLong() * 2L
-
-        return this.segment.asSlice(4L, bytes).mismatch(other.segment.asSlice(4L, bytes)) == -1L
+        return this.nativePayloadEquals(other, size.toLong() * Short.SIZE_BYTES)
     }
 
-    for (i in 0 until size) {
-        if (this[i] != other[i]) return false
+    for (index in 0 until size) {
+        if (this[index] != other[index]) return false
     }
 
     return true
@@ -62,13 +63,11 @@ fun IntView.contentEquals(other: IntView): Boolean {
     if (size != other.size) return false
 
     if (this is NativeView && other is NativeView) {
-        val bytes = size.toLong() * 4L
-
-        return this.segment.asSlice(4L, bytes).mismatch(other.segment.asSlice(4L, bytes)) == -1L
+        return this.nativePayloadEquals(other, size.toLong() * Int.SIZE_BYTES)
     }
 
-    for (i in 0 until size) {
-        if (this[i] != other[i]) return false
+    for (index in 0 until size) {
+        if (this[index] != other[index]) return false
     }
 
     return true
@@ -79,13 +78,11 @@ fun LongView.contentEquals(other: LongView): Boolean {
     if (size != other.size) return false
 
     if (this is NativeView && other is NativeView) {
-        val bytes = size.toLong() * 8L
-
-        return this.segment.asSlice(4L, bytes).mismatch(other.segment.asSlice(4L, bytes)) == -1L
+        return this.nativePayloadEquals(other, size.toLong() * Long.SIZE_BYTES)
     }
 
-    for (i in 0 until size) {
-        if (this[i] != other[i]) return false
+    for (index in 0 until size) {
+        if (this[index] != other[index]) return false
     }
 
     return true

@@ -12,8 +12,9 @@ import org.punkrecordz.totem.view.toVarIntByteArray
 import org.punkrecordz.totem.view.toVarIntShortArray
 import java.lang.foreign.Arena
 import java.lang.foreign.MemorySegment
-import java.util.*
+import java.util.Random
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class PropertyTests {
@@ -29,7 +30,6 @@ class PropertyTests {
         assertEquals(1, indexOf2)
         assertEquals(-1, indexOf9)
 
-
         assertTrue(bytes.contentEquals(heapView.array))
 
         val copyView = heapView.copy()
@@ -39,7 +39,7 @@ class PropertyTests {
         assertTrue(heapView.contentEquals(otherView))
 
         val mismatchedView = HeapByteArrayTag(byteArrayOf(1, 2, 3, 2, 9))
-        kotlin.test.assertFalse(heapView.contentEquals(mismatchedView))
+        assertFalse(heapView.contentEquals(mismatchedView))
 
         // test generic ArrayView.contentEquals
         val arrayView1: ArrayView = heapView
@@ -47,11 +47,11 @@ class PropertyTests {
         assertTrue(arrayView1.contentEquals(arrayView2))
 
         val diffTypeView: ArrayView = HeapIntArrayTag(intArrayOf(1, 2, 3, 2, 1))
-        kotlin.test.assertFalse(arrayView1.contentEquals(diffTypeView))
+        assertFalse(arrayView1.contentEquals(diffTypeView))
 
         // test Native & Mixed contentEquals pathways
         Arena.ofConfined().use { arena ->
-            val segment1 = arena.allocate(9) // 4 bytes for size (5) + 5 bytes for data
+            val segment1 = arena.allocate(9)
             segment1.set(MemoryLayouts.INT, 0L, 5)
             MemorySegment.copy(MemorySegment.ofArray(byteArrayOf(1, 2, 3, 2, 1)), 0L, segment1, 4L, 5L)
             val nativeView1 = NativeByteArrayTag(segment1)
@@ -67,12 +67,12 @@ class PropertyTests {
             val nativeView3 = NativeByteArrayTag(segment3)
 
             assertTrue(nativeView1.contentEquals(nativeView2))
-            kotlin.test.assertFalse(nativeView1.contentEquals(nativeView3))
+            assertFalse(nativeView1.contentEquals(nativeView3))
 
             // mixed comparison (heap vs native)
             assertTrue(heapView.contentEquals(nativeView1))
             assertTrue(nativeView1.contentEquals(heapView))
-            kotlin.test.assertFalse(heapView.contentEquals(nativeView3))
+            assertFalse(heapView.contentEquals(nativeView3))
         }
     }
 
@@ -110,11 +110,11 @@ class PropertyTests {
                     "Classical heap decoded array mismatch at iteration $iteration.",
                 )
 
-                for (i in array.indices) {
+                for (index in array.indices) {
                     assertEquals(
-                        array[i],
-                        decodedView[i],
-                        "Off-heap decoded array mismatch at index $i in iteration $iteration.",
+                        array[index],
+                        decodedView[index],
+                        "Off-heap decoded array mismatch at index $index in iteration $iteration.",
                     )
                 }
             }
@@ -177,3 +177,4 @@ class PropertyTests {
     }
 
 }
+

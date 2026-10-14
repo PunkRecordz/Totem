@@ -5,11 +5,20 @@ import java.lang.foreign.MemorySegment
 
 interface TagProtocol<T : Tag> {
 
+    val fixedSize: Long? get() = null
+
     fun read(segment: MemorySegment, offset: Long): T
 
     fun calculateSize(segment: MemorySegment, offset: Long): Long
 
     fun write(segment: MemorySegment, offset: Long, tag: T): Long
+
+    fun write(
+        segment: MemorySegment,
+        offset: Long,
+        tag: T,
+        precalculatedSize: Long,
+    ): Long = write(segment, offset, tag)
 
     fun sizeOf(tag: T): Long
 
