@@ -1,6 +1,6 @@
 [versions]
 kotlin = "2.3.20"
-jlibdeflate = "0.1.0"
+jlibdeflate = "0.2.0"
 querz-nbt = "6.1"
 jmh = "1.37"
 kotest = "5.9.0"
