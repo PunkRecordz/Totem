@@ -3,24 +3,14 @@ package org.punkrecordz.totem.codec
 import org.punkrecordz.totem.tag.TagType
 import org.punkrecordz.totem.tag.contract.Tag
 import org.punkrecordz.totem.tag.contract.TagKey
+import java.util.concurrent.ConcurrentHashMap
 
-/**
- * Registry mapping NBT tag type IDs (0..12) to their corresponding serialization protocols.
- *
- * Strategy:
- * Uses a flat direct-indexed array lookup for standard NBT IDs (0..15) to eliminate [java.lang.Integer]
- * boxing and hash bucket traversals in HotSpot, with a secondary concurrent-safe map fallback for
- * custom user-extended protocols.
- *
- * Performance targets:
- * O(1) single-instruction array index lookup for every tag traversal and serialization step.
- */
 object ProtocolRegistry {
 
     @Suppress("UNCHECKED_CAST")
     private val fastProtocolTable: Array<TagProtocol<Tag>?> = arrayOfNulls(16)
 
-    private val customProtocols = mutableMapOf<Int, TagProtocol<*>>()
+    private val customProtocols = ConcurrentHashMap<Int, TagProtocol<*>>()
 
     init {
         registerDirect(TagType.END.id, EndProtocol)

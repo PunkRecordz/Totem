@@ -5,6 +5,7 @@ import org.punkrecordz.totem.io.MemoryLayouts
 import org.punkrecordz.totem.tag.LongArrayTag
 import org.punkrecordz.totem.view.NativeView
 import java.lang.foreign.MemorySegment
+import java.util.Objects
 
 @JvmInline
 value class NativeLongArrayTag(
@@ -15,13 +16,10 @@ value class NativeLongArrayTag(
         get() = segment.get(MemoryLayouts.INT, 0L)
 
     val sizeInBytes: Long
-        get() {
-            val intSize = MemoryLayouts.INT.byteSize()
-
-            return intSize + (size.toLong() * 8L)
-        }
+        get() = segment.byteSize()
 
     override fun get(index: Int): Long {
+        Objects.checkIndex(index, size)
         val intSize = MemoryLayouts.INT.byteSize()
 
         return segment.get(
@@ -31,6 +29,7 @@ value class NativeLongArrayTag(
     }
 
     override fun set(index: Int, value: Long) {
+        Objects.checkIndex(index, size)
         val intSize = MemoryLayouts.INT.byteSize()
 
         segment.set(

@@ -23,9 +23,30 @@ class NativeBinaryTagWriter(
         }
     }
 
-    private fun writeListHeader(elementType: TagKey, size: Int) {
+    internal fun writeListHeader(elementType: TagKey, size: Int) {
         outputStream.writeByte(elementType.id.toByte())
         outputStream.writeInt(size)
+    }
+
+    internal fun writeTagPayload(tag: Tag) {
+        val segmentAndSize = when (tag) {
+            is NativeByteArrayTag -> tag.segment to tag.sizeInBytes
+            is NativeIntArrayTag -> tag.segment to tag.sizeInBytes
+            is NativeLongArrayTag -> tag.segment to tag.sizeInBytes
+            else -> null
+        }
+
+        if (segmentAndSize != null) {
+            outputStream.writeSegment(segmentAndSize.first, segmentAndSize.second)
+            return
+        }
+
+        val protocol = ProtocolRegistry.getOrThrow(tag.key.id)
+        val size = protocol.sizeOf(tag)
+        val tempSegment = outputStream.arena.allocateUninitialized(size)
+
+        protocol.write(tempSegment, 0L, tag, size)
+        outputStream.writeSegment(tempSegment, size)
     }
 
     override fun byte(name: String, value: Byte) {
@@ -107,27 +128,7 @@ class NativeBinaryTagWriter(
 
     override fun tag(name: String, tag: Tag) {
         writeHeader(tag.key, name)
-
-        val protocol = ProtocolRegistry.getOrThrow(tag.key.id)
-        val size = protocol.sizeOf(tag)
-
-        val nativeSegment = when (tag) {
-            is NativeByteArrayTag -> tag.segment
-            is NativeIntArrayTag -> tag.segment
-            is NativeLongArrayTag -> tag.segment
-            else -> null
-        }
-
-        if (nativeSegment != null) {
-            outputStream.writeSegment(nativeSegment)
-
-            return
-        }
-
-        val tempSegment = outputStream.arena.allocateUninitialized(size)
-
-        protocol.write(tempSegment, 0L, tag)
-        outputStream.writeSegment(tempSegment, size)
+        writeTagPayload(tag)
     }
 
 }

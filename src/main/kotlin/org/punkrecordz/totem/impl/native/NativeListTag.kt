@@ -26,7 +26,6 @@ value class NativeListTag<T : Tag>(
             val byteSize = MemoryLayouts.BYTE.byteSize()
             val count = segment.get(MemoryLayouts.INT, byteSize)
 
-            // validate element count
             if (count < 0) {
                 throw IllegalStateException("NativeListTag segment contains negative element count: $count")
             }
@@ -36,9 +35,9 @@ value class NativeListTag<T : Tag>(
 
     override fun isEmpty(): Boolean = size == 0
 
-    override fun contains(element: T): Boolean = any { it == element }
+    override fun contains(element: T): Boolean = any { candidate -> candidate == element }
 
-    override fun containsAll(elements: Collection<T>): Boolean = elements.all { contains(it) }
+    override fun containsAll(elements: Collection<T>): Boolean = elements.all { candidate -> contains(candidate) }
 
     override fun get(index: Int): T {
         val typeId = segment.get(MemoryLayouts.BYTE, 0L).toInt()
@@ -46,10 +45,17 @@ value class NativeListTag<T : Tag>(
 
         val protocol = ProtocolRegistry.getOrThrow(typeId)
         val headerSize = MemoryLayouts.BYTE.byteSize() + MemoryLayouts.INT.byteSize()
+        val fixedElementSize = protocol.fixedSize
 
-        var offset = headerSize
-        repeat(index) {
-            offset += protocol.calculateSize(segment, offset)
+        val offset = if (fixedElementSize != null) {
+            headerSize + (index.toLong() * fixedElementSize)
+        } else {
+            var currentOffset = headerSize
+            repeat(index) {
+                currentOffset += protocol.calculateSize(segment, currentOffset)
+            }
+            protocol.calculateSize(segment, currentOffset)
+            currentOffset
         }
 
         @Suppress("UNCHECKED_CAST")
@@ -70,6 +76,7 @@ value class NativeListTag<T : Tag>(
     override fun iterator(): MutableIterator<T> {
         val typeId = segment.get(MemoryLayouts.BYTE, 0L).toInt()
         val protocol = ProtocolRegistry.getOrThrow(typeId)
+        val fixedElementSize = protocol.fixedSize
         val headerSize = MemoryLayouts.BYTE.byteSize() + MemoryLayouts.INT.byteSize()
         val count = size
 
@@ -81,9 +88,10 @@ value class NativeListTag<T : Tag>(
 
             override fun next(): T {
                 if (cursor >= count) throw NoSuchElementException()
+                val elementSize = fixedElementSize ?: protocol.calculateSize(segment, currentOffset)
                 @Suppress("UNCHECKED_CAST")
                 val element = protocol.read(segment, currentOffset) as T
-                currentOffset += protocol.calculateSize(segment, currentOffset)
+                currentOffset += elementSize
                 cursor++
                 return element
             }
@@ -97,14 +105,15 @@ value class NativeListTag<T : Tag>(
     override fun listIterator(index: Int): MutableListIterator<T> {
         val typeId = segment.get(MemoryLayouts.BYTE, 0L).toInt()
         val protocol = ProtocolRegistry.getOrThrow(typeId)
+        val fixedElementSize = protocol.fixedSize
         val headerSize = MemoryLayouts.BYTE.byteSize() + MemoryLayouts.INT.byteSize()
 
         val count = size
         val offsets = LongArray(count)
         var offset = headerSize
-        for (i in 0 until count) {
-            offsets[i] = offset
-            offset += protocol.calculateSize(segment, offset)
+        for (elementIndex in 0 until count) {
+            offsets[elementIndex] = offset
+            offset += fixedElementSize ?: protocol.calculateSize(segment, offset)
         }
 
         return object : MutableListIterator<T> {

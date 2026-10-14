@@ -1,9 +1,10 @@
 package org.punkrecordz.totem.codec
 
+import org.punkrecordz.totem.ffi.TotemSys
 import org.punkrecordz.totem.impl.native.NativeListTag
 import org.punkrecordz.totem.io.MemoryLayouts
+import org.punkrecordz.totem.tag.CompoundTag
 import org.punkrecordz.totem.tag.ListTag
-import org.punkrecordz.totem.tag.TagType
 import org.punkrecordz.totem.tag.contract.Tag
 import java.lang.foreign.MemorySegment
 
@@ -14,51 +15,40 @@ object ListProtocol : TagProtocol<ListTag<Tag>> {
     }
 
     override fun calculateSize(segment: MemorySegment, offset: Long): Long {
-        val typeId = segment.get(MemoryLayouts.BYTE, offset).toInt()
-        val count = segment.get(MemoryLayouts.INT, offset + MemoryLayouts.BYTE.byteSize())
-
-        // validate element count
-        if (count < 0) {
-            throw IllegalArgumentException("ListTag element count must be non-negative, but was $count at offset $offset")
-        }
-
-        val headerSize = MemoryLayouts.BYTE.byteSize() + MemoryLayouts.INT.byteSize()
-
-        if (count == 0) {
-            return headerSize
-        }
-
-        val protocol = ProtocolRegistry.getOrThrow(typeId)
-        val fixedElementSize = protocol.fixedSize
-
-        if (fixedElementSize != null) {
-            return headerSize + (count.toLong() * fixedElementSize)
-        }
-
-        var currentOffset = offset + headerSize
-
-        repeat(count) {
-            val elementSize = protocol.calculateSize(segment, currentOffset)
-
-            // ensure offset strictly advances
-            if (elementSize <= 0) {
-                throw IllegalStateException("Calculated non-positive element size: $elementSize for list element type ID $typeId at offset $currentOffset")
-            }
-
-            currentOffset += elementSize
-        }
-
-        return currentOffset - offset
+        return TotemSys.calculateListSize(segment, offset)
     }
 
-    override fun write(segment: MemorySegment, offset: Long, tag: ListTag<Tag>): Long {
+    override fun write(
+        segment: MemorySegment,
+        offset: Long,
+        tag: ListTag<Tag>,
+    ): Long = writeWithDepth(segment, offset, tag, -1L, depth = 0)
+
+    override fun write(
+        segment: MemorySegment,
+        offset: Long,
+        tag: ListTag<Tag>,
+        precalculatedSize: Long,
+    ): Long = writeWithDepth(segment, offset, tag, precalculatedSize, depth = 0)
+
+    internal fun writeWithDepth(
+        segment: MemorySegment,
+        offset: Long,
+        tag: ListTag<Tag>,
+        precalculatedSize: Long,
+        depth: Int,
+    ): Long {
+        if (depth > CompoundProtocol.MAX_NBT_DEPTH) {
+            throw IllegalArgumentException("NBT nesting depth exceeds maximum limit of ${CompoundProtocol.MAX_NBT_DEPTH}")
+        }
+
         if (tag is NativeListTag) {
-            val totalSize = calculateSize(tag.segment, 0L)
+            val totalSize = if (precalculatedSize >= 0L) precalculatedSize else calculateSize(tag.segment, 0L)
             MemorySegment.copy(tag.segment, 0L, segment, offset, totalSize)
             return totalSize
         }
 
-        val elementType = (tag as? ListTag<*>)?.elementType ?: TagType.END
+        val elementType = tag.elementType
 
         val headerSize = MemoryLayouts.BYTE.byteSize() + MemoryLayouts.INT.byteSize()
 
@@ -68,22 +58,46 @@ object ListProtocol : TagProtocol<ListTag<Tag>> {
         var currentOffset = offset + headerSize
 
         if (tag.isNotEmpty()) {
+            if (depth + 1 > CompoundProtocol.MAX_NBT_DEPTH) {
+                throw IllegalArgumentException("NBT nesting depth exceeds maximum limit of ${CompoundProtocol.MAX_NBT_DEPTH}")
+            }
+
             val protocol = ProtocolRegistry.getOrThrow(elementType.id)
             for (element in tag) {
-                currentOffset += protocol.write(segment, currentOffset, element)
+                currentOffset += when (element) {
+                    is CompoundTag -> CompoundProtocol.writeWithDepth(segment, currentOffset, element, -1L, depth + 1)
+                    is ListTag<*> -> {
+                        @Suppress("UNCHECKED_CAST")
+                        writeWithDepth(segment, currentOffset, element as ListTag<Tag>, -1L, depth + 1)
+                    }
+                    else -> protocol.write(segment, currentOffset, element)
+                }
             }
         }
 
         return currentOffset - offset
     }
 
-    override fun sizeOf(tag: ListTag<Tag>): Long {
+    override fun sizeOf(tag: ListTag<Tag>): Long = sizeOfWithDepth(tag, depth = 0)
+
+    internal fun sizeOfWithDepth(
+        tag: ListTag<Tag>,
+        depth: Int,
+    ): Long {
+        if (depth > CompoundProtocol.MAX_NBT_DEPTH) {
+            throw IllegalArgumentException("NBT nesting depth exceeds maximum limit of ${CompoundProtocol.MAX_NBT_DEPTH}")
+        }
+
         if (tag is NativeListTag) {
             return calculateSize(tag.segment, 0L)
         }
 
         val headerSize = MemoryLayouts.BYTE.byteSize() + MemoryLayouts.INT.byteSize()
         if (tag.isEmpty()) return headerSize
+
+        if (depth + 1 > CompoundProtocol.MAX_NBT_DEPTH) {
+            throw IllegalArgumentException("NBT nesting depth exceeds maximum limit of ${CompoundProtocol.MAX_NBT_DEPTH}")
+        }
 
         val elementType = tag.elementType
         val protocol = ProtocolRegistry.getOrThrow(elementType.id)
@@ -95,10 +109,18 @@ object ListProtocol : TagProtocol<ListTag<Tag>> {
 
         var elementsSize = 0L
         for (element in tag) {
-            elementsSize += protocol.sizeOf(element)
+            elementsSize += when (element) {
+                is CompoundTag -> CompoundProtocol.sizeOfWithDepth(element, depth + 1)
+                is ListTag<*> -> {
+                    @Suppress("UNCHECKED_CAST")
+                    sizeOfWithDepth(element as ListTag<Tag>, depth + 1)
+                }
+                else -> protocol.sizeOf(element)
+            }
         }
 
         return headerSize + elementsSize
     }
 
 }
+

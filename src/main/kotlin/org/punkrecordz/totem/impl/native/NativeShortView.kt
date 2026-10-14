@@ -1,6 +1,5 @@
 package org.punkrecordz.totem.impl.native
 
-import org.punkrecordz.totem.concurrent.TotemThreadPool
 import org.punkrecordz.totem.ffi.TotemSys
 import org.punkrecordz.totem.io.MemoryLayouts
 import org.punkrecordz.totem.io.allocateUninitialized
@@ -9,28 +8,8 @@ import org.punkrecordz.totem.view.ShortView
 import java.lang.foreign.Arena
 import java.lang.foreign.MemorySegment
 import java.lang.foreign.ValueLayout
-import java.util.concurrent.Callable
+import java.util.Objects
 
-private const val HEADER_OFFSET: Long = 4L
-private const val PARALLEL_THRESHOLD_ELEMENTS: Long = 65536L
-
-/**
- * Zero-allocation off-heap view over a continuous sequence of 16-bit short integers.
- *
- * Strategy:
- * Uses a Kotlin [JvmInline] value class wrapping a raw [MemorySegment]. At runtime, HotSpot erases
- * this wrapper to a pure 64-bit reference, avoiding JVM object headers, garbage collection pressure,
- * and heap indirection. Aligned 2-byte access and parallel AVX2 SIMD routines deliver maximum throughput
- * for block manipulation pipelines.
- *
- * Trade-offs:
- * Off-heap segments must be bound to a valid [Arena] lifecycle. Accessing memory after arena closure
- * causes compile-enforced or runtime safe illegal state failures rather than silent memory corruption.
- *
- * Performance targets:
- * Direct memory instructions on aligned 2-byte short values matching native memory endianness,
- * with sub-millisecond batch replacements across millions of block states.
- */
 @JvmInline
 value class NativeShortView(
     override val segment: MemorySegment,
@@ -40,16 +19,20 @@ value class NativeShortView(
         get() = segment.get(MemoryLayouts.INT, 0L)
 
     override operator fun get(index: Int): Short {
+        Objects.checkIndex(index, size)
+
         return segment.get(
             NATIVE_SHORT,
-            HEADER_OFFSET + (index.toLong() shl 1),
+            SHORT_VIEW_HEADER_OFFSET + (index.toLong() shl 1),
         )
     }
 
     override operator fun set(index: Int, value: Short) {
+        Objects.checkIndex(index, size)
+
         segment.set(
             NATIVE_SHORT,
-            HEADER_OFFSET + (index.toLong() shl 1),
+            SHORT_VIEW_HEADER_OFFSET + (index.toLong() shl 1),
             value,
         )
     }
@@ -61,44 +44,15 @@ value class NativeShortView(
         val elementCount = size.toLong()
         if (elementCount == 0L) return
 
-        val payloadSlice = segment.asSlice(HEADER_OFFSET)
+        val payloadSlice = segment.asSlice(SHORT_VIEW_HEADER_OFFSET)
 
-        // sequential fast path for smaller datasets
-        if (elementCount < PARALLEL_THRESHOLD_ELEMENTS) {
+        NativeShortViewSimdOps.executeParallel(elementCount, payloadSlice) { workerSlice, count ->
             TotemSys.replaceShorts(
-                payloadSlice,
-                elementCount,
+                workerSlice,
+                count,
                 target,
                 replacement,
             )
-            return
-        }
-
-        val availableProcessors = Runtime.getRuntime().availableProcessors().coerceIn(1, 16)
-        val chunkSize = (elementCount + availableProcessors - 1) / availableProcessors
-        val partitionCount = ((elementCount + chunkSize - 1) / chunkSize).toInt()
-        val rawBaseAddress = payloadSlice.address()
-
-        val tasks = (0 until partitionCount).map { partitionIndex ->
-            val startOffset = partitionIndex.toLong() * chunkSize
-            val count = minOf(chunkSize, elementCount - startOffset)
-
-            Callable {
-                val workerSlice = MemorySegment.ofAddress(rawBaseAddress + (startOffset shl 1))
-                    .reinterpret(count shl 1)
-
-                TotemSys.replaceShorts(
-                    workerSlice,
-                    count,
-                    target,
-                    replacement,
-                )
-            }
-        }
-
-        val futures = TotemThreadPool.executor.invokeAll(tasks)
-        for (future in futures) {
-            future.get()
         }
     }
 
@@ -106,42 +60,14 @@ value class NativeShortView(
         val elementCount = size.toLong()
         if (elementCount == 0L) return
 
-        val payloadSlice = segment.asSlice(HEADER_OFFSET)
+        val payloadSlice = segment.asSlice(SHORT_VIEW_HEADER_OFFSET)
 
-        // sequential fast path for smaller datasets
-        if (elementCount < PARALLEL_THRESHOLD_ELEMENTS) {
+        NativeShortViewSimdOps.executeParallel(elementCount, payloadSlice) { workerSlice, count ->
             TotemSys.fillShorts(
-                payloadSlice,
-                elementCount,
+                workerSlice,
+                count,
                 value,
             )
-            return
-        }
-
-        val availableProcessors = Runtime.getRuntime().availableProcessors().coerceIn(1, 16)
-        val chunkSize = (elementCount + availableProcessors - 1) / availableProcessors
-        val partitionCount = ((elementCount + chunkSize - 1) / chunkSize).toInt()
-        val rawBaseAddress = payloadSlice.address()
-
-        val tasks = (0 until partitionCount).map { partitionIndex ->
-            val startOffset = partitionIndex.toLong() * chunkSize
-            val count = minOf(chunkSize, elementCount - startOffset)
-
-            Callable {
-                val workerSlice = MemorySegment.ofAddress(rawBaseAddress + (startOffset shl 1))
-                    .reinterpret(count shl 1)
-
-                TotemSys.fillShorts(
-                    workerSlice,
-                    count,
-                    value,
-                )
-            }
-        }
-
-        val futures = TotemThreadPool.executor.invokeAll(tasks)
-        for (future in futures) {
-            future.get()
         }
     }
 
@@ -149,59 +75,11 @@ value class NativeShortView(
         val elementCount = size.toLong()
         if (elementCount == 0L || lookupTable.isEmpty()) return
 
-        val payloadSlice = segment.asSlice(HEADER_OFFSET)
-
-        Arena.ofShared().use { tempArena ->
-            val lookupTableSegment = tempArena.allocate(65536L * Short.SIZE_BYTES)
-            val copyCount = minOf(65536, lookupTable.size)
-            MemorySegment.copy(
-                MemorySegment.ofArray(lookupTable),
-                0L,
-                lookupTableSegment,
-                0L,
-                copyCount.toLong() * Short.SIZE_BYTES,
-            )
-
-            // sequential fast path for smaller datasets
-            if (elementCount < PARALLEL_THRESHOLD_ELEMENTS) {
-                TotemSys.translateShorts(
-                    payloadSlice,
-                    elementCount,
-                    lookupTableSegment,
-                )
-                return
-            }
-
-            val availableProcessors = Runtime.getRuntime().availableProcessors().coerceIn(1, 16)
-            val chunkSize = (elementCount + availableProcessors - 1) / availableProcessors
-            val partitionCount = ((elementCount + chunkSize - 1) / chunkSize).toInt()
-            val rawBaseAddress = payloadSlice.address()
-            val rawLutAddress = lookupTableSegment.address()
-
-            val tasks = (0 until partitionCount).map { partitionIndex ->
-                val startOffset = partitionIndex.toLong() * chunkSize
-                val count = minOf(chunkSize, elementCount - startOffset)
-
-                Callable {
-                    val workerSlice = MemorySegment.ofAddress(rawBaseAddress + (startOffset shl 1))
-                        .reinterpret(count shl 1)
-                    val workerLutSlice = MemorySegment.ofAddress(rawLutAddress)
-                        .reinterpret(65536L * Short.SIZE_BYTES)
-
-                    TotemSys.translateShorts(
-                        workerSlice,
-                        count,
-                        workerLutSlice,
-                    )
-                }
-            }
-
-
-            val futures = TotemThreadPool.executor.invokeAll(tasks)
-            for (future in futures) {
-                future.get()
-            }
-        }
+        NativeShortViewSimdOps.translate(
+            payloadSlice = segment.asSlice(SHORT_VIEW_HEADER_OFFSET),
+            elementCount = elementCount,
+            lookupTable = lookupTable,
+        )
     }
 
     override fun translate(lookupTable: IntArray) {
@@ -209,8 +87,18 @@ value class NativeShortView(
         translate(shortTable)
     }
 
-    override fun copy(): NativeShortView {
+    override fun scanMatchingIndices(shouldIgnore: BooleanArray): IntArray {
+        val elementCount = size.toLong()
+        if (elementCount == 0L || shouldIgnore.isEmpty()) return IntArray(0)
 
+        return NativeShortViewSimdOps.scanMatchingIndices(
+            payloadSlice = segment.asSlice(SHORT_VIEW_HEADER_OFFSET),
+            elementCount = elementCount,
+            shouldIgnore = shouldIgnore,
+        )
+    }
+
+    override fun copy(): NativeShortView {
         val newSegment = Arena.ofAuto().allocateUninitialized(segment.byteSize())
         MemorySegment.copy(segment, 0L, newSegment, 0L, segment.byteSize())
 

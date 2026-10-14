@@ -1,6 +1,17 @@
 package org.punkrecordz.totem.tag
 
-import org.punkrecordz.totem.impl.heap.*
+import org.punkrecordz.totem.impl.heap.HeapByteArrayTag
+import org.punkrecordz.totem.impl.heap.HeapByteTag
+import org.punkrecordz.totem.impl.heap.HeapCompoundTag
+import org.punkrecordz.totem.impl.heap.HeapDoubleTag
+import org.punkrecordz.totem.impl.heap.HeapFloatTag
+import org.punkrecordz.totem.impl.heap.HeapIntArrayTag
+import org.punkrecordz.totem.impl.heap.HeapIntTag
+import org.punkrecordz.totem.impl.heap.HeapListTag
+import org.punkrecordz.totem.impl.heap.HeapLongArrayTag
+import org.punkrecordz.totem.impl.heap.HeapLongTag
+import org.punkrecordz.totem.impl.heap.HeapShortTag
+import org.punkrecordz.totem.impl.heap.HeapStringTag
 import org.punkrecordz.totem.impl.native.NativeByteArrayTag
 import org.punkrecordz.totem.impl.native.NativeIntArrayTag
 import org.punkrecordz.totem.impl.native.NativeLongArrayTag
@@ -9,6 +20,7 @@ import org.punkrecordz.totem.io.allocateUninitialized
 import org.punkrecordz.totem.tag.contract.Tag
 import org.punkrecordz.totem.tag.contract.TagKey
 import java.lang.foreign.Arena
+import java.lang.foreign.MemorySegment
 
 object Tags {
 
@@ -35,34 +47,33 @@ object Tags {
     fun nativeByteArray(
         size: Int,
         arena: Arena,
-    ): ByteArrayTag {
-        val byteSize = MemoryLayouts.INT.byteSize() + (size.toLong() * MemoryLayouts.BYTE.byteSize())
-        val segment = arena.allocateUninitialized(byteSize)
-        segment.set(MemoryLayouts.INT, 0L, size)
-
-        return NativeByteArrayTag(segment)
-    }
+    ): ByteArrayTag = NativeByteArrayTag(
+        allocateNativeArraySegment(size, MemoryLayouts.BYTE.byteSize(), arena),
+    )
 
     fun nativeIntArray(
         size: Int,
         arena: Arena,
-    ): IntArrayTag {
-        val byteSize = MemoryLayouts.INT.byteSize() + (size.toLong() * MemoryLayouts.INT.byteSize())
-        val segment = arena.allocateUninitialized(byteSize)
-        segment.set(MemoryLayouts.INT, 0L, size)
-
-        return NativeIntArrayTag(segment)
-    }
+    ): IntArrayTag = NativeIntArrayTag(
+        allocateNativeArraySegment(size, MemoryLayouts.INT.byteSize(), arena),
+    )
 
     fun nativeLongArray(
         size: Int,
         arena: Arena,
-    ): LongArrayTag {
-        val byteSize = MemoryLayouts.INT.byteSize() + (size.toLong() * MemoryLayouts.LONG.byteSize())
+    ): LongArrayTag = NativeLongArrayTag(
+        allocateNativeArraySegment(size, MemoryLayouts.LONG.byteSize(), arena),
+    )
+
+    private fun allocateNativeArraySegment(
+        size: Int,
+        elementByteSize: Long,
+        arena: Arena,
+    ): MemorySegment {
+        val byteSize = MemoryLayouts.INT.byteSize() + (size.toLong() * elementByteSize)
         val segment = arena.allocateUninitialized(byteSize)
         segment.set(MemoryLayouts.INT, 0L, size)
-
-        return NativeLongArrayTag(segment)
+        return segment
     }
 
     fun compound(

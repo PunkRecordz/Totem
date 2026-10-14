@@ -141,12 +141,8 @@ object MemoryLayouts {
         for (characterIndex in 0 until characterLength) {
             val codePoint = value[characterIndex].code
             when {
-                codePoint == 0 -> byteLength += 1
-                codePoint < 0x0080 -> {
-                    // standard 1-byte ascii
-                }
-                codePoint < 0x0800 -> byteLength += 1
-                else -> byteLength += 2
+                codePoint == 0 || codePoint in 0x0080..0x07FF -> byteLength += 1
+                codePoint >= 0x0800 -> byteLength += 2
             }
         }
 

@@ -13,17 +13,14 @@ class NativeByteArrayOutputStream(
     private val channel: FileChannel? = null,
 ) {
 
-    // 4mb chunk size balances virtual memory allocation overhead and page alignment limits
     private val chunkSize = 4 * 1024 * 1024L
     private val chunks = mutableListOf<MemorySegment>()
 
-    // 128mb initial memory map accommodates medium/large files immediately without expensive remapping
     private val initialMapSize = 128 * 1024 * 1024L
     private val singleByte = ByteBuffer.allocate(1)
     private var currentSegment: MemorySegment
     private var position = 0L
 
-    // tracking remap count to issue diagnostics in case of excessive virtual memory churn
     private var remapCount = 0
 
     var totalWritten = 0L
@@ -98,6 +95,34 @@ class NativeByteArrayOutputStream(
         writeSegment(MemorySegment.ofArray(bytes))
     }
 
+    fun writeByteArray(
+        bytes: ByteArray,
+        offset: Int,
+        length: Int,
+    ) {
+        require(offset >= 0 && length >= 0 && offset + length <= bytes.size) {
+            "Offset ($offset) and length ($length) must be within array bounds of size ${bytes.size}"
+        }
+
+        if (length == 0) {
+            return
+        }
+
+        ensureCapacity(length.toLong())
+
+        MemorySegment.copy(
+            bytes,
+            offset,
+            currentSegment,
+            ValueLayout.JAVA_BYTE,
+            position,
+            length,
+        )
+
+        position += length.toLong()
+        totalWritten += length.toLong()
+    }
+
     fun writeIntArray(elements: IntArray) {
         val size = elements.size
         val byteSize = size.toLong() * 4L
@@ -128,7 +153,6 @@ class NativeByteArrayOutputStream(
             throw IllegalArgumentException("String character length ($characterLength) exceeds maximum size of 65535 bytes")
         }
 
-        // reserve capacity and write string directly into off-heap memory without heap allocation
         val byteLength = MemoryLayouts.stringByteLength(text)
         val totalNeeded = MemoryLayouts.SHORT.byteSize() + byteLength.toLong()
         ensureCapacity(totalNeeded)
@@ -166,14 +190,13 @@ class NativeByteArrayOutputStream(
                 val newSize = maxOf(currentSize * 2L, position + needed)
 
                 remapCount++
-                // warn if remapping > 3 times as it signals bad initialMapSize selection and risks address space fragmentation
                 if (remapCount > 3) {
                     System.err.println(
                         StringBuilder().apply {
                             append("WARNING: NativeByteArrayOutputStream has remapped the memory-mapped file $remapCount times. ")
                             append("This can lead to significant virtual memory fragmentation and performance overhead. ")
                             append("Consider increasing 'initialMapSize' (currently ${initialMapSize / 1024 / 1024}MB) to accommodate large files.")
-                        }.toString()
+                        }.toString(),
                     )
                 }
 

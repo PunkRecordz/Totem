@@ -1,10 +1,5 @@
 package org.punkrecordz.totem.io.stream
 
-import org.punkrecordz.totem.codec.ProtocolRegistry
-import org.punkrecordz.totem.impl.native.NativeByteArrayTag
-import org.punkrecordz.totem.impl.native.NativeIntArrayTag
-import org.punkrecordz.totem.impl.native.NativeLongArrayTag
-import org.punkrecordz.totem.io.allocateUninitialized
 import org.punkrecordz.totem.tag.TagType
 import org.punkrecordz.totem.tag.contract.Tag
 import org.punkrecordz.totem.tag.contract.TagKey
@@ -28,7 +23,7 @@ class NativeBinaryListTagWriter(
 
         if (writtenCount > expectedSize) {
             throw IllegalStateException(
-                "Attempted to write more elements ($writtenCount) than the declared size ($expectedSize) of the list of $elementType"
+                "Attempted to write more elements ($writtenCount) than the declared size ($expectedSize) of the list of $elementType",
             )
         }
     }
@@ -36,7 +31,7 @@ class NativeBinaryListTagWriter(
     fun verifyComplete() {
         if (writtenCount != expectedSize) {
             throw IllegalStateException(
-                "Declared list size was $expectedSize, but only $writtenCount elements were actually written for the list of $elementType"
+                "Declared list size was $expectedSize, but only $writtenCount elements were actually written for the list of $elementType",
             )
         }
     }
@@ -130,8 +125,7 @@ class NativeBinaryListTagWriter(
         verifyType(TagType.LIST)
         verifyElementWrite()
 
-        parent.outputStream.writeByte(elementType.id.toByte())
-        parent.outputStream.writeInt(size)
+        parent.writeListHeader(elementType, size)
 
         val listWriter = NativeBinaryListTagWriter(parent, elementType, size)
         listWriter.block()
@@ -142,26 +136,7 @@ class NativeBinaryListTagWriter(
         verifyType(tag.key)
         verifyElementWrite()
 
-        val segmentAndSize = when (tag) {
-            is NativeByteArrayTag -> tag.segment to tag.sizeInBytes
-            is NativeIntArrayTag -> tag.segment to tag.sizeInBytes
-            is NativeLongArrayTag -> tag.segment to tag.sizeInBytes
-            else -> null
-        }
-
-        if (segmentAndSize != null) {
-            parent.outputStream.writeSegment(segmentAndSize.first, segmentAndSize.second)
-
-            return
-        }
-
-        val protocol = ProtocolRegistry.getOrThrow(tag.key.id)
-        val size = protocol.sizeOf(tag)
-
-        val tempSegment = parent.outputStream.arena.allocateUninitialized(size)
-
-        protocol.write(tempSegment, 0L, tag)
-        parent.outputStream.writeSegment(tempSegment, size)
+        parent.writeTagPayload(tag)
     }
 
 }

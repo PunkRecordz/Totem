@@ -13,6 +13,13 @@ interface TagProtocol<T : Tag> {
 
     fun write(segment: MemorySegment, offset: Long, tag: T): Long
 
+    fun write(
+        segment: MemorySegment,
+        offset: Long,
+        tag: T,
+        precalculatedSize: Long,
+    ): Long = write(segment, offset, tag)
+
     fun sizeOf(tag: T): Long
 
 }
