@@ -45,7 +45,7 @@ End-to-end NBT pipeline (loading a compressed schematic of 44 million blocks (`1
 | :--- | :--- | :--- |
 | **Querz NBT** (Standard Java NBT) | 1,797.60 ms | Baseline |
 | **Totem 1.0.2** | 325.79 ms | 5.52x Faster |
-| **Totem 2.0.0** | **92.90 ms** | **19.35x Faster** |
+| **Totem 2.0.1** | **92.90 ms** | **19.35x Faster** |
 
 *Measured on JDK 24 (HotSpot 64-Bit Server VM).*
 
@@ -78,7 +78,7 @@ repositories {
 }
 
 dependencies {
-    implementation("org.punkrecordz:totem:2.0.0")
+    implementation("org.punkrecordz:totem:2.0.1")
 }
 ```
 
