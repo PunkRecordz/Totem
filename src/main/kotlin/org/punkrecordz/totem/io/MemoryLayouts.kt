@@ -63,6 +63,9 @@ object MemoryLayouts {
                         throw IllegalArgumentException("Malformed Modified UTF-8: truncated 2-byte sequence at index $byteIndex")
                     }
                     val trailingByte = bytes[byteIndex++].toInt()
+                    if ((trailingByte and 0xC0) != 0x80) {
+                        throw IllegalArgumentException("Malformed Modified UTF-8: invalid continuation byte at index ${byteIndex - 1}")
+                    }
                     characters[characterIndex++] = (((leadingByte and 0x1F) shl 6) or (trailingByte and 0x3F)).toChar()
                 }
                 14 -> {
@@ -71,6 +74,9 @@ object MemoryLayouts {
                     }
                     val secondByte = bytes[byteIndex++].toInt()
                     val thirdByte = bytes[byteIndex++].toInt()
+                    if ((secondByte and 0xC0) != 0x80 || (thirdByte and 0xC0) != 0x80) {
+                        throw IllegalArgumentException("Malformed Modified UTF-8: invalid continuation byte at index ${byteIndex - 2}")
+                    }
                     characters[characterIndex++] = (((leadingByte and 0x0F) shl 12) or ((secondByte and 0x3F) shl 6) or (thirdByte and 0x3F)).toChar()
                 }
                 else -> throw IllegalArgumentException("Malformed Modified UTF-8 at index ${byteIndex - 1}")

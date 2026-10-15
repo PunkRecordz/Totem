@@ -129,6 +129,8 @@ value class NativeCompoundTag(
                 break
             }
 
+            val protocol = ProtocolRegistry.getOrThrow(typeId)
+
             val nameOffset = offset + byteSize
             if (nameOffset + shortSize > segmentByteSize) {
                 break
@@ -141,7 +143,6 @@ value class NativeCompoundTag(
                 break
             }
 
-            val protocol = ProtocolRegistry.getOrThrow(typeId)
             val entrySize = try {
                 protocol.calculateSize(segment, valueOffset)
             } catch (_: IndexOutOfBoundsException) {

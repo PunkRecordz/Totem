@@ -1,6 +1,7 @@
 package org.punkrecordz.totem.view
 
 import org.punkrecordz.totem.concurrent.TotemThreadPool
+import org.punkrecordz.totem.concurrent.awaitResult
 import org.punkrecordz.totem.ffi.TotemSys
 import org.punkrecordz.totem.impl.native.NativeByteArrayTag
 import org.punkrecordz.totem.impl.native.NativeShortView
@@ -80,13 +81,16 @@ fun ByteView.toVarIntShortArray(
     var totalDecodedShorts = 0
 
     for (index in 0 until availableCores) {
-        val count = countFutures[index].get()
+        val count = countFutures[index].awaitResult()
+        val remainingNeeded = (expectedSize - totalDecodedShorts).coerceAtLeast(0)
+        val assignedCount = minOf(count, remainingNeeded)
+
         partitionShortOffsets[index] = totalDecodedShorts
-        partitionShortCounts[index] = count
-        totalDecodedShorts += count
+        partitionShortCounts[index] = assignedCount
+        totalDecodedShorts += assignedCount
     }
 
-    if (totalDecodedShorts != expectedSize) {
+    if (totalDecodedShorts < expectedSize) {
         throw IllegalArgumentException(
             "Incomplete VarInt data: expected $expectedSize elements, but buffer contained $totalDecodedShorts VarInt values.",
         )
@@ -117,7 +121,7 @@ fun ByteView.toVarIntShortArray(
 
     val decodeFutures = TotemThreadPool.executor.invokeAll(decodeTasks)
     for (future in decodeFutures) {
-        future.get()
+        future.awaitResult()
     }
 
     return view
@@ -181,7 +185,7 @@ fun ShortView.toVarIntByteArray(
 
     val sizeFutures = TotemThreadPool.executor.invokeAll(sizeTasks)
     val partitionByteSizes = LongArray(partitionCount) { index ->
-        sizeFutures[index].get()
+        sizeFutures[index].awaitResult()
     }
 
     val partitionByteOffsets = LongArray(partitionCount)
@@ -224,7 +228,7 @@ fun ShortView.toVarIntByteArray(
 
     val encodeFutures = TotemThreadPool.executor.invokeAll(encodeTasks)
     for (future in encodeFutures) {
-        future.get()
+        future.awaitResult()
     }
 
     return NativeByteArrayTag(targetSegment)

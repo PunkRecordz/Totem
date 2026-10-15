@@ -1,6 +1,7 @@
 package org.punkrecordz.totem.impl.native
 
 import org.punkrecordz.totem.concurrent.TotemThreadPool
+import org.punkrecordz.totem.concurrent.awaitResult
 import org.punkrecordz.totem.ffi.TotemSys
 import org.punkrecordz.totem.io.allocateUninitialized
 import java.lang.foreign.Arena
@@ -42,7 +43,7 @@ internal object NativeShortViewSimdOps {
 
         val futures = TotemThreadPool.executor.invokeAll(tasks)
         for (future in futures) {
-            future.get()
+            future.awaitResult()
         }
     }
 
@@ -146,7 +147,7 @@ internal object NativeShortViewSimdOps {
             }
 
             val countFutures = TotemThreadPool.executor.invokeAll(countTasks)
-            val partitionCounts = LongArray(partitionCount) { index -> countFutures[index].get() }
+            val partitionCounts = LongArray(partitionCount) { index -> countFutures[index].awaitResult() }
             val totalMatches = partitionCounts.sum()
 
             if (totalMatches == 0L) {
@@ -197,7 +198,7 @@ internal object NativeShortViewSimdOps {
 
             val scanFutures = TotemThreadPool.executor.invokeAll(scanTasks)
             for (future in scanFutures) {
-                future.get()
+                future.awaitResult()
             }
 
             val result = IntArray(totalMatches.toInt())

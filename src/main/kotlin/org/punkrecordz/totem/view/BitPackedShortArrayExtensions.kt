@@ -2,6 +2,7 @@ package org.punkrecordz.totem.view
 
 import org.punkrecordz.totem.codec.BlockDataCodec
 import org.punkrecordz.totem.concurrent.TotemThreadPool
+import org.punkrecordz.totem.concurrent.awaitResult
 import org.punkrecordz.totem.ffi.TotemBitPackSys
 import org.punkrecordz.totem.impl.heap.HeapLongArrayTag
 import org.punkrecordz.totem.impl.native.NativeLongArrayTag
@@ -192,7 +193,7 @@ private fun unpackNativeParallel(
 
     val futures = TotemThreadPool.executor.invokeAll(tasks)
     for (future in futures) {
-        future.get()
+        future.awaitResult()
     }
 }
 
@@ -244,6 +245,6 @@ private fun packNativeParallel(
 
     val futures = TotemThreadPool.executor.invokeAll(tasks)
     for (future in futures) {
-        future.get()
+        future.awaitResult()
     }
 }

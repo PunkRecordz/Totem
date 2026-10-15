@@ -2,6 +2,7 @@ package org.punkrecordz.totem.io.compression
 
 import com.fulcrumgenomics.jlibdeflate.LibdeflateCompressor
 import org.punkrecordz.totem.concurrent.TotemThreadPool
+import org.punkrecordz.totem.concurrent.awaitResult
 import org.punkrecordz.totem.io.allocateUninitialized
 import org.punkrecordz.totem.io.memory.OffHeapScratchBuffer
 import java.lang.foreign.Arena
@@ -196,7 +197,7 @@ class GzipCompression(val level: Int = 1) : Compression {
 
             val futures = TotemThreadPool.executor.invokeAll(tasks)
             for (future in futures) {
-                future.get()
+                future.awaitResult()
             }
 
             var totalCompressedSize = 0L

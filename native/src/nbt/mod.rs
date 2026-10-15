@@ -1,6 +1,6 @@
 mod skip;
 
-use skip::{advance_ptr, skip_nbt_tag, NbtSkipError};
+use skip::{advance_ptr, skip_nbt_tag, validate_matched_tag, NbtSkipError};
 
 /// Calculates the exact byte size of an NBT compound tag starting at `ptr`.
 /// Returns the size in bytes including the trailing Tag_End (0), -1 if truncated, -2 if malformed, or -3 if depth exceeded.
@@ -9,8 +9,8 @@ pub unsafe extern "C" fn calculate_compound_size(ptr: *const u8, max_len: u64) -
     if ptr.is_null() || max_len == 0 {
         return 0;
     }
-    let end = ptr.add(max_len as usize);
-    match skip_nbt_tag(10, ptr, end, 0) {
+    let end = unsafe { ptr.add(max_len as usize) };
+    match unsafe { skip_nbt_tag(10, ptr, end, 0) } {
         Ok(after) => (after as usize - ptr as usize) as i64,
         Err(NbtSkipError::Truncated) => -1,
         Err(NbtSkipError::Malformed) => -2,
@@ -26,8 +26,8 @@ pub unsafe extern "C" fn calculate_list_size(ptr: *const u8, max_len: u64) -> i6
     if ptr.is_null() || max_len < 5 {
         return -1;
     }
-    let end = ptr.add(max_len as usize);
-    match skip_nbt_tag(9, ptr, end, 0) {
+    let end = unsafe { ptr.add(max_len as usize) };
+    match unsafe { skip_nbt_tag(9, ptr, end, 0) } {
         Ok(after) => (after as usize - ptr as usize) as i64,
         Err(NbtSkipError::Truncated) => -1,
         Err(NbtSkipError::Malformed) => -2,
@@ -48,38 +48,45 @@ pub unsafe extern "C" fn find_compound_entry(
     if ptr.is_null() || max_len == 0 || key_ptr.is_null() {
         return -1;
     }
-    let end = ptr.add(max_len as usize);
-    let key = core::slice::from_raw_parts(key_ptr, key_len as usize);
+    let end = unsafe { ptr.add(max_len as usize) };
+    let key = unsafe { core::slice::from_raw_parts(key_ptr, key_len as usize) };
     let mut curr = ptr;
 
     loop {
-        let after_type = match advance_ptr(curr, end, 1) {
+        let after_type = match unsafe { advance_ptr(curr, end, 1) } {
             Ok(next) => next,
             Err(_) => return -1,
         };
-        let field_type = *curr;
+        let field_type = unsafe { *curr };
         if field_type == 0 {
             return -1;
         }
         if field_type > 12 {
             return -2;
         }
-        let name_ptr = match advance_ptr(after_type, end, 2) {
+        let name_ptr = match unsafe { advance_ptr(after_type, end, 2) } {
             Ok(next) => next,
             Err(_) => return -1,
         };
-        let name_len = u16::from_be(core::ptr::read_unaligned(after_type as *const u16)) as usize;
-        let value_ptr = match advance_ptr(name_ptr, end, name_len) {
+        let name_len = u16::from_be(unsafe { core::ptr::read_unaligned(after_type as *const u16) }) as usize;
+        let value_ptr = match unsafe { advance_ptr(name_ptr, end, name_len) } {
             Ok(next) => next,
             Err(_) => return -1,
         };
 
-        if name_len == key.len() && core::slice::from_raw_parts(name_ptr, name_len) == key {
-            let offset = value_ptr as usize - ptr as usize;
-            return ((field_type as i64) << 48) | (offset as i64);
+        if name_len == key.len() && unsafe { core::slice::from_raw_parts(name_ptr, name_len) } == key {
+            match unsafe { validate_matched_tag(field_type, value_ptr, end) } {
+                Ok(()) => {
+                    let offset = value_ptr as usize - ptr as usize;
+                    return ((field_type as i64) << 48) | (offset as i64);
+                }
+                Err(NbtSkipError::Truncated) => return -1,
+                Err(NbtSkipError::Malformed) => return -2,
+                Err(NbtSkipError::DepthExceeded) => return -3,
+            }
         }
 
-        match skip_nbt_tag(field_type, value_ptr, end, 1) {
+        match unsafe { skip_nbt_tag(field_type, value_ptr, end, 1) } {
             Ok(next) => curr = next,
             Err(NbtSkipError::Truncated) => return -1,
             Err(NbtSkipError::Malformed) => return -2,
@@ -145,6 +152,8 @@ mod tests {
         let neg_list = vec![0x09u8, 0x00, 0x00, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0x00];
         let res = unsafe { find_compound_entry(neg_list.as_ptr(), neg_list.len() as u64, b"x".as_ptr(), 1) };
         assert_eq!(res, -2);
+        let res_direct = unsafe { find_compound_entry(neg_list.as_ptr(), neg_list.len() as u64, b"".as_ptr(), 0) };
+        assert_eq!(res_direct, -2);
 
         let mut deep_nbt = Vec::new();
         for _ in 0..600 {

@@ -152,4 +152,23 @@ class ModifiedUtf8Tests {
         }
     }
 
+    @Test
+    fun testMalformedContinuationBytesThrowIllegalArgumentException() {
+        val invalidTwoByteSequence = byteArrayOf(0xC2.toByte(), 0x41.toByte())
+        assertFailsWith<IllegalArgumentException> {
+            MemoryLayouts.decodeString(invalidTwoByteSequence)
+        }
+
+        val invalidThreeByteSecond = byteArrayOf(0xE2.toByte(), 0x28.toByte(), 0xA1.toByte())
+        assertFailsWith<IllegalArgumentException> {
+            MemoryLayouts.decodeString(invalidThreeByteSecond)
+        }
+
+        val invalidThreeByteThird = byteArrayOf(0xE2.toByte(), 0x82.toByte(), 0x28.toByte())
+        assertFailsWith<IllegalArgumentException> {
+            MemoryLayouts.decodeString(invalidThreeByteThird)
+        }
+    }
+
 }
+

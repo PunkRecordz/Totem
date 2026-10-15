@@ -1,7 +1,9 @@
 package org.punkrecordz.totem.concurrent
 
+import java.util.concurrent.ExecutionException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.Future
 
 object TotemThreadPool {
 
@@ -17,3 +19,12 @@ object TotemThreadPool {
     }
 
 }
+
+internal fun <T> Future<T>.awaitResult(): T {
+    return try {
+        get()
+    } catch (exception: ExecutionException) {
+        throw exception.cause ?: exception
+    }
+}
+
