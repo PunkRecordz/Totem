@@ -137,6 +137,10 @@ class UnitTests {
             assertFailsWith<IllegalArgumentException> {
                 root.containsKey("x")
             }
+
+            assertFailsWith<IllegalArgumentException> {
+                root.containsKey("")
+            }
         }
     }
 
@@ -154,6 +158,10 @@ class UnitTests {
 
             assertFailsWith<IllegalArgumentException> {
                 root.containsKey("x")
+            }
+
+            assertFailsWith<IllegalArgumentException> {
+                root.containsKey("")
             }
         }
     }
@@ -173,6 +181,10 @@ class UnitTests {
             assertFailsWith<IllegalArgumentException> {
                 root.containsKey("x")
             }
+
+            assertFailsWith<IllegalArgumentException> {
+                root.containsKey("")
+            }
         }
     }
 
@@ -191,6 +203,10 @@ class UnitTests {
 
             assertFailsWith<IllegalArgumentException> {
                 root.containsKey("x")
+            }
+
+            assertFailsWith<IllegalArgumentException> {
+                root.containsKey("")
             }
         }
     }
@@ -222,6 +238,81 @@ class UnitTests {
 
             assertFailsWith<IllegalArgumentException> {
                 nativeByteArray.toVarIntShortArray(400, arena)
+            }
+        }
+    }
+
+    @Test
+    fun testOverlongVarIntThrowsException() {
+        Arena.ofConfined().use { arena ->
+            val startBytes = byteArrayOf(
+                0x80.toByte(),
+                0x80.toByte(),
+                0x80.toByte(),
+                0x01.toByte(),
+                1,
+                2,
+                3,
+                4,
+            )
+            val startTag = Tags.compound {
+                put("a", Tags.byteArray(startBytes))
+            }
+            val savedStart = Totem.saveToByteArray("", startTag)
+            val (_, loadedStart) = Totem.load(savedStart, arena)
+            val startByteArray = loadedStart.getByteArray("a")!!
+
+            assertFailsWith<IllegalArgumentException> {
+                startByteArray.toVarIntShortArray(5, arena)
+            }
+
+            val endBytes = byteArrayOf(
+                1,
+                2,
+                3,
+                4,
+                0x80.toByte(),
+                0x80.toByte(),
+                0x80.toByte(),
+                0x01.toByte(),
+            )
+            val endTag = Tags.compound {
+                put("a", Tags.byteArray(endBytes))
+            }
+            val savedEnd = Totem.saveToByteArray("", endTag)
+            val (_, loadedEnd) = Totem.load(savedEnd, arena)
+            val endByteArray = loadedEnd.getByteArray("a")!!
+
+            assertFailsWith<IllegalArgumentException> {
+                endByteArray.toVarIntShortArray(5, arena)
+            }
+        }
+    }
+
+    @Test
+    fun testParallelOverlongVarIntThrowsIllegalArgumentException() {
+        Arena.ofConfined().use { arena ->
+            val elementCount = 200_000
+            val byteLength = elementCount + 3
+            val nativeByteArray = Tags.nativeByteArray(byteLength, arena)
+            val segment = (nativeByteArray as NativeByteArrayTag).segment
+
+            for (index in 0 until byteLength) {
+                segment.set(ValueLayout.JAVA_BYTE, 4L + index, 1.toByte())
+            }
+
+            val corruptOffset = 10_000L
+            segment.set(ValueLayout.JAVA_BYTE, 4L + corruptOffset, 0x80.toByte())
+            segment.set(ValueLayout.JAVA_BYTE, 4L + corruptOffset + 1L, 0x80.toByte())
+            segment.set(ValueLayout.JAVA_BYTE, 4L + corruptOffset + 2L, 0x80.toByte())
+            segment.set(ValueLayout.JAVA_BYTE, 4L + corruptOffset + 3L, 0x01.toByte())
+
+            assertFailsWith<IllegalArgumentException> {
+                nativeByteArray.toVarIntShortArray(elementCount, arena)
+            }
+
+            assertFailsWith<IllegalArgumentException> {
+                nativeByteArray.toVarIntShortArray(elementCount - 10, arena)
             }
         }
     }

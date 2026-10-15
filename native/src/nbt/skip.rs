@@ -28,47 +28,109 @@ pub unsafe fn advance_ptr(
 }
 
 #[inline(always)]
-unsafe fn skip_leaf_tag(
+pub unsafe fn skip_leaf_tag(
     type_id: u8,
     ptr: *const u8,
     end: *const u8,
 ) -> Result<*const u8, NbtSkipError> {
     match type_id {
         0 => Ok(ptr),
-        1 => advance_ptr(ptr, end, 1),
-        2 => advance_ptr(ptr, end, 2),
-        3 | 5 => advance_ptr(ptr, end, 4),
-        4 | 6 => advance_ptr(ptr, end, 8),
+        1 => unsafe { advance_ptr(ptr, end, 1) },
+        2 => unsafe { advance_ptr(ptr, end, 2) },
+        3 | 5 => unsafe { advance_ptr(ptr, end, 4) },
+        4 | 6 => unsafe { advance_ptr(ptr, end, 8) },
         7 => {
-            let payload = advance_ptr(ptr, end, 4)?;
+            let payload = unsafe { advance_ptr(ptr, end, 4)? };
             let len = i32::from_be(unsafe { core::ptr::read_unaligned(ptr as *const i32) });
             if len < 0 {
                 return Err(NbtSkipError::Malformed);
             }
-            advance_ptr(payload, end, len as usize)
+            unsafe { advance_ptr(payload, end, len as usize) }
         }
         8 => {
-            let payload = advance_ptr(ptr, end, 2)?;
+            let payload = unsafe { advance_ptr(ptr, end, 2)? };
             let len = u16::from_be(unsafe { core::ptr::read_unaligned(ptr as *const u16) }) as usize;
-            advance_ptr(payload, end, len)
+            unsafe { advance_ptr(payload, end, len) }
         }
         11 => {
-            let payload = advance_ptr(ptr, end, 4)?;
+            let payload = unsafe { advance_ptr(ptr, end, 4)? };
             let len = i32::from_be(unsafe { core::ptr::read_unaligned(ptr as *const i32) });
             if len < 0 {
                 return Err(NbtSkipError::Malformed);
             }
-            advance_ptr(payload, end, (len as usize) * 4)
+            let byte_len = (len as usize)
+                .checked_mul(4)
+                .ok_or(NbtSkipError::Malformed)?;
+            unsafe { advance_ptr(payload, end, byte_len) }
         }
         12 => {
-            let payload = advance_ptr(ptr, end, 4)?;
+            let payload = unsafe { advance_ptr(ptr, end, 4)? };
             let len = i32::from_be(unsafe { core::ptr::read_unaligned(ptr as *const i32) });
             if len < 0 {
                 return Err(NbtSkipError::Malformed);
             }
-            advance_ptr(payload, end, (len as usize) * 8)
+            let byte_len = (len as usize)
+                .checked_mul(8)
+                .ok_or(NbtSkipError::Malformed)?;
+            unsafe { advance_ptr(payload, end, byte_len) }
         }
         _ => Err(NbtSkipError::Malformed),
+    }
+}
+
+#[inline(always)]
+pub unsafe fn validate_matched_tag(
+    type_id: u8,
+    ptr: *const u8,
+    end: *const u8,
+) -> Result<(), NbtSkipError> {
+    match type_id {
+        9 => {
+            let payload = unsafe { advance_ptr(ptr, end, 5)? };
+            let elem_type = unsafe { *ptr };
+            let count = i32::from_be(unsafe { core::ptr::read_unaligned(ptr.add(1) as *const i32) });
+            if count < 0 {
+                return Err(NbtSkipError::Malformed);
+            }
+            if count == 0 {
+                return Ok(());
+            }
+            if elem_type == 0 || elem_type > 12 {
+                return Err(NbtSkipError::Malformed);
+            }
+            let ucount = count as usize;
+            match elem_type {
+                1 => {
+                    unsafe { advance_ptr(payload, end, ucount)? };
+                }
+                2 => {
+                    let bytes = ucount.checked_mul(2).ok_or(NbtSkipError::Malformed)?;
+                    unsafe { advance_ptr(payload, end, bytes)? };
+                }
+                3 | 5 => {
+                    let bytes = ucount.checked_mul(4).ok_or(NbtSkipError::Malformed)?;
+                    unsafe { advance_ptr(payload, end, bytes)? };
+                }
+                4 | 6 => {
+                    let bytes = ucount.checked_mul(8).ok_or(NbtSkipError::Malformed)?;
+                    unsafe { advance_ptr(payload, end, bytes)? };
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+        10 => {
+            let _ = unsafe { advance_ptr(ptr, end, 1)? };
+            let first_type = unsafe { *ptr };
+            if first_type > 12 {
+                return Err(NbtSkipError::Malformed);
+            }
+            Ok(())
+        }
+        _ => {
+            let _ = unsafe { skip_leaf_tag(type_id, ptr, end)? };
+            Ok(())
+        }
     }
 }
 

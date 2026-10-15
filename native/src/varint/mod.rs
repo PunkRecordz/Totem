@@ -145,4 +145,43 @@ mod tests {
         assert!(boundaries[1] >= 1 && boundaries[1] < sample.len() as u64);
         assert_eq!(sample[boundaries[1] as usize - 1] & 0x80, 0);
     }
+
+    #[test]
+    fn test_rejects_varint_longer_than_three_bytes() {
+        let start_case = vec![0x80u8, 0x80, 0x80, 0x01, 1, 2, 3, 4];
+        let mut decoded = vec![0u16; 5];
+        let result_start = unsafe {
+            decode_varint_shorts(
+                start_case.as_ptr(),
+                start_case.len() as u64,
+                decoded.as_mut_ptr(),
+                5,
+            )
+        };
+        assert_eq!(result_start, -1);
+
+        let end_case = vec![1u8, 2, 3, 4, 0x80, 0x80, 0x80, 0x01];
+        let result_end = unsafe {
+            decode_varint_shorts(
+                end_case.as_ptr(),
+                end_case.len() as u64,
+                decoded.as_mut_ptr(),
+                5,
+            )
+        };
+        assert_eq!(result_end, -1);
+
+        let mut large_case = vec![1u8; 128];
+        large_case.splice(10..10, [0x80u8, 0x80, 0x80, 0x01]);
+        let mut large_decoded = vec![0u16; 129];
+        let result_large = unsafe {
+            decode_varint_shorts(
+                large_case.as_ptr(),
+                large_case.len() as u64,
+                large_decoded.as_mut_ptr(),
+                129,
+            )
+        };
+        assert_eq!(result_large, -1);
+    }
 }

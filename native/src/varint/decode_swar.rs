@@ -22,23 +22,27 @@ pub unsafe fn decode_single(source: &[u8], offset: &mut usize) -> Option<u16> {
 }
 
 /// Helper to decode a single VarInt element branchlessly from an already loaded 32-bit register.
-/// Returns the decoded short and the new source offset.
+/// Returns `Some((decoded_short, new_source_offset))` on valid 1..=3 byte VarInts, or `None` if the VarInt exceeds 3 bytes.
 #[inline(always)]
-pub fn decode_single_from_packed(packed: u32, offset: usize) -> (u16, usize) {
+pub fn decode_single_from_packed(packed: u32, offset: usize) -> Option<(u16, usize)> {
     let b0 = (packed & 0xFF) as u8;
     if (b0 & 0x80) == 0 {
-        return (b0 as u16, offset + 1);
+        return Some((b0 as u16, offset + 1));
     }
 
     let b1 = ((packed >> 8) & 0xFF) as u8;
     if (b1 & 0x80) == 0 {
         let val = ((b0 & 0x7F) as u16) | (((b1 & 0x7F) as u16) << 7);
-        return (val, offset + 2);
+        return Some((val, offset + 2));
     }
 
     let b2 = ((packed >> 16) & 0xFF) as u8;
-    let val = ((b0 & 0x7F) as u16) | (((b1 & 0x7F) as u16) << 7) | (((b2 & 0x7F) as u16) << 14);
-    (val, offset + 3)
+    if (b2 & 0x80) == 0 {
+        let val = ((b0 & 0x7F) as u16) | (((b1 & 0x7F) as u16) << 7) | ((b2 as u16) << 14);
+        return Some((val, offset + 3));
+    }
+
+    None
 }
 
 /// Fallback 64-bit SWAR decoder processing 8 or 4 elements per iteration.
@@ -86,10 +90,14 @@ pub unsafe fn decode_varint_shorts_swar(
             destination_offset += 4;
         } else {
             let packed = packed_64 as u32;
-            let (value, new_src) = decode_single_from_packed(packed, source_offset);
-            *destination.get_unchecked_mut(destination_offset) = value;
-            source_offset = new_src;
-            destination_offset += 1;
+            match decode_single_from_packed(packed, source_offset) {
+                Some((value, new_src)) => {
+                    *destination.get_unchecked_mut(destination_offset) = value;
+                    source_offset = new_src;
+                    destination_offset += 1;
+                }
+                None => break,
+            }
         }
     }
 
@@ -120,10 +128,14 @@ pub unsafe fn decode_varint_shorts_swar_4(
             source_offset += 4;
             destination_offset += 4;
         } else {
-            let (value, new_src) = decode_single_from_packed(packed, source_offset);
-            *destination.get_unchecked_mut(destination_offset) = value;
-            source_offset = new_src;
-            destination_offset += 1;
+            match decode_single_from_packed(packed, source_offset) {
+                Some((value, new_src)) => {
+                    *destination.get_unchecked_mut(destination_offset) = value;
+                    source_offset = new_src;
+                    destination_offset += 1;
+                }
+                None => break,
+            }
         }
     }
 

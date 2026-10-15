@@ -1,7 +1,6 @@
-use super::decode_swar::{
-    decode_single, decode_single_from_packed, decode_varint_shorts_swar,
-    decode_varint_shorts_swar_4,
-};
+use super::decode_swar::{decode_single, decode_varint_shorts_swar};
+#[cfg(target_arch = "x86_64")]
+use super::decode_swar::{decode_single_from_packed, decode_varint_shorts_swar_4};
 
 /// Decodes 32 or 64 VarInts at a time using AVX2, with branchless 8-wide decoding for mixed 1/2-byte streams.
 #[cfg(target_arch = "x86_64")]
@@ -136,10 +135,14 @@ unsafe fn decode_varint_shorts_avx2(
         if source_offset + 4 <= src_len && destination_offset < dst_len {
             let pointer = src_ptr.add(source_offset) as *const u32;
             let packed = u32::from_le(core::ptr::read_unaligned(pointer));
-            let (value, new_src) = decode_single_from_packed(packed, source_offset);
-            *dst_ptr.add(destination_offset) = value;
-            source_offset = new_src;
-            destination_offset += 1;
+            match decode_single_from_packed(packed, source_offset) {
+                Some((value, new_src)) => {
+                    *dst_ptr.add(destination_offset) = value;
+                    source_offset = new_src;
+                    destination_offset += 1;
+                }
+                None => break,
+            }
         } else {
             break;
         }
