@@ -10,11 +10,11 @@ pub unsafe extern "C" fn replace_shorts(
         return;
     }
 
-    let slice = core::slice::from_raw_parts_mut(data, len as usize);
+    let slice = unsafe { core::slice::from_raw_parts_mut(data, len as usize) };
 
     #[cfg(target_arch = "x86_64")]
     if is_x86_feature_detected!("avx2") {
-        replace_shorts_avx2(slice, target, replacement);
+        unsafe { replace_shorts_avx2(slice, target, replacement) };
         return;
     }
 
@@ -23,48 +23,39 @@ pub unsafe extern "C" fn replace_shorts(
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn replace_shorts_avx2(slice: &mut [i16], target: i16, replacement: i16) {
+fn replace_shorts_avx2(slice: &mut [i16], target: i16, replacement: i16) {
+    use crate::simd::{load_i16x16, store_i16x16};
     use core::arch::x86_64::*;
 
     let target_vec = _mm256_set1_epi16(target);
     let repl_vec = _mm256_set1_epi16(replacement);
-    let mut i = 0;
-    let len = slice.len();
-    let base_ptr = slice.as_mut_ptr();
+    let (chunks, remainder) = slice.as_chunks_mut::<32>();
 
-    while i + 32 <= len {
-        let ptr0 = base_ptr.add(i) as *mut __m256i;
-        let ptr1 = base_ptr.add(i + 16) as *mut __m256i;
+    for chunk in chunks {
+        let (c0, rest) = chunk.split_first_chunk_mut::<16>().unwrap();
+        let c1: &mut [i16; 16] = rest.try_into().unwrap();
 
-        let data0 = _mm256_loadu_si256(ptr0);
-        let data1 = _mm256_loadu_si256(ptr1);
+        let data0 = load_i16x16(c0);
+        let data1 = load_i16x16(c1);
 
         let mask0 = _mm256_cmpeq_epi16(data0, target_vec);
         let mask1 = _mm256_cmpeq_epi16(data1, target_vec);
 
         if _mm256_testz_si256(mask0, mask0) == 0 {
             let result0 = _mm256_blendv_epi8(data0, repl_vec, mask0);
-            _mm256_storeu_si256(ptr0, result0);
+            store_i16x16(c0, result0);
         }
 
         if _mm256_testz_si256(mask1, mask1) == 0 {
             let result1 = _mm256_blendv_epi8(data1, repl_vec, mask1);
-            _mm256_storeu_si256(ptr1, result1);
+            store_i16x16(c1, result1);
         }
-
-        i += 32;
     }
 
-    while i < len {
-        let element = slice.get_unchecked_mut(i);
-        if *element == target {
-            *element = replacement;
-        }
-        i += 1;
-    }
+    replace_shorts_fallback(remainder, target, replacement);
 }
 
-unsafe fn replace_shorts_fallback(slice: &mut [i16], target: i16, replacement: i16) {
+fn replace_shorts_fallback(slice: &mut [i16], target: i16, replacement: i16) {
     for element in slice.iter_mut() {
         if *element == target {
             *element = replacement;
@@ -83,11 +74,11 @@ pub unsafe extern "C" fn fill_shorts(
         return;
     }
 
-    let slice = core::slice::from_raw_parts_mut(data, len as usize);
+    let slice = unsafe { core::slice::from_raw_parts_mut(data, len as usize) };
 
     #[cfg(target_arch = "x86_64")]
     if is_x86_feature_detected!("avx2") {
-        fill_shorts_avx2(slice, value);
+        unsafe { fill_shorts_avx2(slice, value) };
         return;
     }
 
@@ -96,21 +87,16 @@ pub unsafe extern "C" fn fill_shorts(
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn fill_shorts_avx2(slice: &mut [i16], value: i16) {
+fn fill_shorts_avx2(slice: &mut [i16], value: i16) {
+    use crate::simd::store_i16x16;
     use core::arch::x86_64::*;
 
     let val_vec = _mm256_set1_epi16(value);
-    let mut i = 0;
-    let len = slice.len();
+    let (chunks, remainder) = slice.as_chunks_mut::<16>();
 
-    while i + 16 <= len {
-        let ptr = slice.as_mut_ptr().add(i) as *mut __m256i;
-        _mm256_storeu_si256(ptr, val_vec);
-        i += 16;
+    for chunk in chunks {
+        store_i16x16(chunk, val_vec);
     }
 
-    while i < len {
-        *slice.get_unchecked_mut(i) = value;
-        i += 1;
-    }
+    remainder.fill(value);
 }

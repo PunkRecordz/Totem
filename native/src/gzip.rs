@@ -14,10 +14,11 @@ pub unsafe extern "C" fn scan_gzip_members(
     }
 
     let slice = unsafe { core::slice::from_raw_parts(data, len) };
+    let out_slice = unsafe { core::slice::from_raw_parts_mut(out_offsets, max_out) };
 
     #[cfg(target_arch = "x86_64")]
     let (mut count, mut offset) = if is_x86_feature_detected!("avx2") {
-        unsafe { scan_gzip_members_avx2(slice, out_offsets, max_out) }
+        unsafe { scan_gzip_members_avx2(slice, out_slice) }
     } else {
         (0, 0)
     };
@@ -25,69 +26,61 @@ pub unsafe extern "C" fn scan_gzip_members(
     #[cfg(not(target_arch = "x86_64"))]
     let (mut count, mut offset) = (0usize, 0usize);
 
-    unsafe {
-        scan_gzip_members_scalar(slice, out_offsets, max_out, &mut count, &mut offset);
-    }
+    scan_gzip_members_scalar(slice, out_slice, &mut count, &mut offset);
 
     count as i32
 }
 
+#[inline(always)]
+fn is_valid_gzip_header_at(slice: &[u8], candidate: usize) -> bool {
+    let Some(header) = slice.get(candidate..candidate + 18) else {
+        return false;
+    };
+    if header[0] != 0x1F || header[1] != 0x8B || header[2] != 0x08 {
+        return false;
+    }
+    let flg = header[3];
+    let xfl = header[8];
+    if (flg & 0xE0) != 0 || !matches!(xfl, 0 | 2 | 4) {
+        return false;
+    }
+    if candidate == 0 {
+        return true;
+    }
+    let Some(trailer_bytes) = slice
+        .get(candidate.wrapping_sub(4)..candidate)
+        .and_then(|s| s.first_chunk::<4>())
+    else {
+        return false;
+    };
+    u32::from_le_bytes(*trailer_bytes) > 0
+}
+
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn scan_gzip_members_avx2(
-    slice: &[u8],
-    out_offsets: *mut i64,
-    max_out: usize,
-) -> (usize, usize) {
+fn scan_gzip_members_avx2(slice: &[u8], out_offsets: &mut [i64]) -> (usize, usize) {
+    use crate::simd::load_u8x32;
     use core::arch::x86_64::*;
 
     let len = slice.len();
+    let max_out = out_offsets.len();
     let mut count = 0;
     let mut offset = 0;
     let target = _mm256_set1_epi8(0x1F_i8);
 
     while offset + 32 + 18 <= len && count < max_out {
-        let chunk = unsafe { _mm256_loadu_si256(slice.as_ptr().add(offset) as *const __m256i) };
+        let chunk_bytes = slice[offset..offset + 32].first_chunk::<32>().unwrap();
+        let chunk = load_u8x32(chunk_bytes);
         let cmp = _mm256_cmpeq_epi8(chunk, target);
         let mut mask = _mm256_movemask_epi8(cmp) as u32;
-
-        if mask == 0 {
-            offset += 32;
-            continue;
-        }
 
         while mask != 0 && count < max_out {
             let trailing = mask.trailing_zeros() as usize;
             let candidate = offset + trailing;
 
-            if candidate + 18 <= len {
-                let b1 = unsafe { *slice.get_unchecked(candidate + 1) };
-                let b2 = unsafe { *slice.get_unchecked(candidate + 2) };
-
-                if b1 == 0x8B && b2 == 0x08 {
-                    let flg = unsafe { *slice.get_unchecked(candidate + 3) };
-                    let xfl = unsafe { *slice.get_unchecked(candidate + 8) };
-                    if (flg & 0xE0) == 0 && matches!(xfl, 0 | 2 | 4) {
-                        if candidate == 0 {
-                            unsafe { *out_offsets.add(count) = 0 };
-                            count += 1;
-                        } else {
-                            let isize = u32::from_le_bytes(unsafe {
-                                [
-                                    *slice.get_unchecked(candidate - 4),
-                                    *slice.get_unchecked(candidate - 3),
-                                    *slice.get_unchecked(candidate - 2),
-                                    *slice.get_unchecked(candidate - 1),
-                                ]
-                            });
-
-                            if isize > 0 {
-                                unsafe { *out_offsets.add(count) = candidate as i64 };
-                                count += 1;
-                            }
-                        }
-                    }
-                }
+            if is_valid_gzip_header_at(slice, candidate) {
+                out_offsets[count] = candidate as i64;
+                count += 1;
             }
 
             mask &= mask - 1;
@@ -100,47 +93,21 @@ unsafe fn scan_gzip_members_avx2(
 }
 
 #[inline(always)]
-unsafe fn scan_gzip_members_scalar(
+fn scan_gzip_members_scalar(
     slice: &[u8],
-    out_offsets: *mut i64,
-    max_out: usize,
+    out_offsets: &mut [i64],
     count: &mut usize,
     offset: &mut usize,
 ) {
     let len = slice.len();
+    let max_out = out_offsets.len();
 
     while *offset + 18 <= len && *count < max_out {
-        let b0 = unsafe { *slice.get_unchecked(*offset) };
-        let b1 = unsafe { *slice.get_unchecked(*offset + 1) };
-        let b2 = unsafe { *slice.get_unchecked(*offset + 2) };
-
-        if b0 == 0x1F && b1 == 0x8B && b2 == 0x08 {
-            let flg = unsafe { *slice.get_unchecked(*offset + 3) };
-            let xfl = unsafe { *slice.get_unchecked(*offset + 8) };
-            if (flg & 0xE0) == 0 && matches!(xfl, 0 | 2 | 4) {
-                if *offset == 0 {
-                    unsafe { *out_offsets.add(*count) = 0 };
-                    *count += 1;
-                    *offset += 10;
-                    continue;
-                }
-
-                let isize = u32::from_le_bytes(unsafe {
-                    [
-                        *slice.get_unchecked(*offset - 4),
-                        *slice.get_unchecked(*offset - 3),
-                        *slice.get_unchecked(*offset - 2),
-                        *slice.get_unchecked(*offset - 1),
-                    ]
-                });
-
-                if isize > 0 {
-                    unsafe { *out_offsets.add(*count) = *offset as i64 };
-                    *count += 1;
-                    *offset += 10;
-                    continue;
-                }
-            }
+        if is_valid_gzip_header_at(slice, *offset) {
+            out_offsets[*count] = *offset as i64;
+            *count += 1;
+            *offset += 10;
+            continue;
         }
 
         *offset += 1;
@@ -194,15 +161,12 @@ mod tests {
         let mut offsets_scalar = [0i64; 8];
         let mut scalar_count = 0usize;
         let mut scalar_offset = 0usize;
-        unsafe {
-            scan_gzip_members_scalar(
-                &stream,
-                offsets_scalar.as_mut_ptr(),
-                offsets_scalar.len(),
-                &mut scalar_count,
-                &mut scalar_offset,
-            );
-        }
+        scan_gzip_members_scalar(
+            &stream,
+            &mut offsets_scalar,
+            &mut scalar_count,
+            &mut scalar_offset,
+        );
         assert_eq!(scalar_count, 3);
         assert_eq!(&offsets_scalar[..3], &[0, 50, 100]);
     }

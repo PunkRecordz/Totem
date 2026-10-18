@@ -1,5 +1,8 @@
+#[forbid(unsafe_code)]
 pub mod element;
+#[forbid(unsafe_code)]
 pub mod pack;
+#[forbid(unsafe_code)]
 pub mod unpack;
 
 use pack::pack_elements_dispatch;
@@ -15,25 +18,24 @@ pub unsafe extern "C" fn unpack_longs_to_shorts(
     precise: bool,
     big_endian_source: bool,
 ) -> usize {
-    if source_longs.is_null() || destination_shorts.is_null() || element_count == 0 || bits_per_entry == 0 || bits_per_entry > 16 {
+    if source_longs.is_null()
+        || destination_shorts.is_null()
+        || element_count == 0
+        || bits_per_entry == 0
+        || bits_per_entry > 16
+    {
         return 0;
     }
 
+    let source = unsafe { core::slice::from_raw_parts(source_longs, longs_count) };
+    let destination = unsafe { core::slice::from_raw_parts_mut(destination_shorts, element_count) };
+
     if big_endian_source {
-        unpack_elements_dispatch::<u16, true>(
-            source_longs,
-            longs_count,
-            destination_shorts,
-            element_count,
-            bits_per_entry as usize,
-            precise,
-        )
+        unpack_elements_dispatch::<u16, true>(source, destination, bits_per_entry as usize, precise)
     } else {
         unpack_elements_dispatch::<u16, false>(
-            source_longs,
-            longs_count,
-            destination_shorts,
-            element_count,
+            source,
+            destination,
             bits_per_entry as usize,
             precise,
         )
@@ -50,28 +52,23 @@ pub unsafe extern "C" fn pack_shorts_to_longs(
     precise: bool,
     big_endian_destination: bool,
 ) -> usize {
-    if source_shorts.is_null() || destination_longs.is_null() || element_count == 0 || longs_count == 0 || bits_per_entry == 0 || bits_per_entry > 16 {
+    if source_shorts.is_null()
+        || destination_longs.is_null()
+        || element_count == 0
+        || longs_count == 0
+        || bits_per_entry == 0
+        || bits_per_entry > 16
+    {
         return 0;
     }
 
+    let source = unsafe { core::slice::from_raw_parts(source_shorts, element_count) };
+    let destination = unsafe { core::slice::from_raw_parts_mut(destination_longs, longs_count) };
+
     if big_endian_destination {
-        pack_elements_dispatch::<u16, true>(
-            source_shorts,
-            element_count,
-            destination_longs,
-            longs_count,
-            bits_per_entry as usize,
-            precise,
-        )
+        pack_elements_dispatch::<u16, true>(source, destination, bits_per_entry as usize, precise)
     } else {
-        pack_elements_dispatch::<u16, false>(
-            source_shorts,
-            element_count,
-            destination_longs,
-            longs_count,
-            bits_per_entry as usize,
-            precise,
-        )
+        pack_elements_dispatch::<u16, false>(source, destination, bits_per_entry as usize, precise)
     }
 }
 
@@ -85,25 +82,24 @@ pub unsafe extern "C" fn unpack_longs_to_longs(
     precise: bool,
     big_endian_source: bool,
 ) -> usize {
-    if source_longs.is_null() || destination_longs.is_null() || element_count == 0 || bits_per_entry == 0 || bits_per_entry > 64 {
+    if source_longs.is_null()
+        || destination_longs.is_null()
+        || element_count == 0
+        || bits_per_entry == 0
+        || bits_per_entry > 64
+    {
         return 0;
     }
 
+    let source = unsafe { core::slice::from_raw_parts(source_longs, longs_count) };
+    let destination = unsafe { core::slice::from_raw_parts_mut(destination_longs, element_count) };
+
     if big_endian_source {
-        unpack_elements_dispatch::<u64, true>(
-            source_longs,
-            longs_count,
-            destination_longs,
-            element_count,
-            bits_per_entry as usize,
-            precise,
-        )
+        unpack_elements_dispatch::<u64, true>(source, destination, bits_per_entry as usize, precise)
     } else {
         unpack_elements_dispatch::<u64, false>(
-            source_longs,
-            longs_count,
-            destination_longs,
-            element_count,
+            source,
+            destination,
             bits_per_entry as usize,
             precise,
         )
@@ -120,28 +116,23 @@ pub unsafe extern "C" fn pack_longs_to_longs(
     precise: bool,
     big_endian_destination: bool,
 ) -> usize {
-    if source_longs.is_null() || destination_longs.is_null() || element_count == 0 || longs_count == 0 || bits_per_entry == 0 || bits_per_entry > 64 {
+    if source_longs.is_null()
+        || destination_longs.is_null()
+        || element_count == 0
+        || longs_count == 0
+        || bits_per_entry == 0
+        || bits_per_entry > 64
+    {
         return 0;
     }
 
+    let source = unsafe { core::slice::from_raw_parts(source_longs, element_count) };
+    let destination = unsafe { core::slice::from_raw_parts_mut(destination_longs, longs_count) };
+
     if big_endian_destination {
-        pack_elements_dispatch::<u64, true>(
-            source_longs,
-            element_count,
-            destination_longs,
-            longs_count,
-            bits_per_entry as usize,
-            precise,
-        )
+        pack_elements_dispatch::<u64, true>(source, destination, bits_per_entry as usize, precise)
     } else {
-        pack_elements_dispatch::<u64, false>(
-            source_longs,
-            element_count,
-            destination_longs,
-            longs_count,
-            bits_per_entry as usize,
-            precise,
-        )
+        pack_elements_dispatch::<u64, false>(source, destination, bits_per_entry as usize, precise)
     }
 }
 
