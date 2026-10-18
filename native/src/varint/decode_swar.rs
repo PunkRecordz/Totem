@@ -1,12 +1,11 @@
 /// Helper to decode a single VarInt element from the source byte slice (slow path fallback near buffer end).
 /// Returns Some(value) on success, or None if the buffer is truncated mid-VarInt.
 #[inline(always)]
-pub unsafe fn decode_single(source: &[u8], offset: &mut usize) -> Option<u16> {
+pub fn decode_single(source: &[u8], offset: &mut usize) -> Option<u16> {
     let mut value = 0u32;
     let mut shift = 0;
 
-    while *offset < source.len() {
-        let byte = unsafe { *source.get_unchecked(*offset) };
+    for &byte in &source[*offset..] {
         *offset += 1;
         value |= ((byte & 0x7F) as u32) << shift;
         if (byte & 0x80) == 0 {
@@ -47,44 +46,32 @@ pub fn decode_single_from_packed(packed: u32, offset: usize) -> Option<(u16, usi
 
 /// Fallback 64-bit SWAR decoder processing 8 or 4 elements per iteration.
 #[inline(always)]
-pub unsafe fn decode_varint_shorts_swar(
+pub fn decode_varint_shorts_swar(
     source: &[u8],
     destination: &mut [u16],
     mut source_offset: usize,
     mut destination_offset: usize,
 ) -> (usize, usize) {
-    while source_offset + 8 <= source.len() && destination_offset + 8 <= destination.len() {
-        let pointer = source.as_ptr().add(source_offset) as *const u64;
-        let packed_64 = u64::from_le(core::ptr::read_unaligned(pointer));
+    while let (Some(src_chunk), Some(dst_chunk)) = (
+        source
+            .get(source_offset..source_offset + 8)
+            .and_then(|s| s.first_chunk::<8>()),
+        destination
+            .get_mut(destination_offset..destination_offset + 8)
+            .and_then(|d| d.first_chunk_mut::<8>()),
+    ) {
+        let packed_64 = u64::from_le_bytes(*src_chunk);
 
         if (packed_64 & 0x8080808080808080) == 0 {
-            let low_32 = packed_64 as u32 as u64;
-            let expanded_low = (low_32 & 0xFF)
-                | ((low_32 & 0xFF00) << 8)
-                | ((low_32 & 0xFF0000) << 16)
-                | ((low_32 & 0xFF000000) << 24);
-
-            let high_32 = (packed_64 >> 32) as u32 as u64;
-            let expanded_high = (high_32 & 0xFF)
-                | ((high_32 & 0xFF00) << 8)
-                | ((high_32 & 0xFF0000) << 16)
-                | ((high_32 & 0xFF000000) << 24);
-
-            let dest_ptr = destination.as_mut_ptr().add(destination_offset) as *mut u64;
-            core::ptr::write_unaligned(dest_ptr, expanded_low.to_le());
-            core::ptr::write_unaligned(dest_ptr.add(1), expanded_high.to_le());
-
+            *dst_chunk = src_chunk.map(u16::from);
             source_offset += 8;
             destination_offset += 8;
-        } else if (packed_64 & 0x8080808080808080) == 0x0080008000800080
-            && destination_offset + 4 <= destination.len()
-        {
-            let low = packed_64 & 0x007F007F007F007F;
-            let high = (packed_64 >> 1) & 0x3F803F803F803F80;
-            let decoded_64 = low | high;
-
-            let dest_ptr = destination.as_mut_ptr().add(destination_offset) as *mut u64;
-            core::ptr::write_unaligned(dest_ptr, decoded_64.to_le());
+        } else if (packed_64 & 0x8080808080808080) == 0x0080008000800080 {
+            let b = *src_chunk;
+            dst_chunk[0] = ((b[0] & 0x7F) as u16) | (((b[1] & 0x7F) as u16) << 7);
+            dst_chunk[1] = ((b[2] & 0x7F) as u16) | (((b[3] & 0x7F) as u16) << 7);
+            dst_chunk[2] = ((b[4] & 0x7F) as u16) | (((b[5] & 0x7F) as u16) << 7);
+            dst_chunk[3] = ((b[6] & 0x7F) as u16) | (((b[7] & 0x7F) as u16) << 7);
 
             source_offset += 8;
             destination_offset += 4;
@@ -92,7 +79,7 @@ pub unsafe fn decode_varint_shorts_swar(
             let packed = packed_64 as u32;
             match decode_single_from_packed(packed, source_offset) {
                 Some((value, new_src)) => {
-                    *destination.get_unchecked_mut(destination_offset) = value;
+                    dst_chunk[0] = value;
                     source_offset = new_src;
                     destination_offset += 1;
                 }
@@ -105,32 +92,30 @@ pub unsafe fn decode_varint_shorts_swar(
 }
 
 #[inline(always)]
-pub unsafe fn decode_varint_shorts_swar_4(
+pub fn decode_varint_shorts_swar_4(
     source: &[u8],
     destination: &mut [u16],
     mut source_offset: usize,
     mut destination_offset: usize,
 ) -> (usize, usize) {
-    while source_offset + 4 <= source.len() && destination_offset + 4 <= destination.len() {
-        let pointer = source.as_ptr().add(source_offset) as *const u32;
-        let packed = u32::from_le(core::ptr::read_unaligned(pointer));
+    while let (Some(src_chunk), Some(dst_chunk)) = (
+        source
+            .get(source_offset..source_offset + 4)
+            .and_then(|s| s.first_chunk::<4>()),
+        destination
+            .get_mut(destination_offset..destination_offset + 4)
+            .and_then(|d| d.first_chunk_mut::<4>()),
+    ) {
+        let packed = u32::from_le_bytes(*src_chunk);
 
         if (packed & 0x80808080) == 0 {
-            let packed_64 = packed as u64;
-            let expanded = (packed_64 & 0xFF)
-                | ((packed_64 & 0xFF00) << 8)
-                | ((packed_64 & 0xFF0000) << 16)
-                | ((packed_64 & 0xFF000000) << 24);
-
-            let destination_pointer = destination.as_mut_ptr().add(destination_offset) as *mut u64;
-            core::ptr::write_unaligned(destination_pointer, expanded.to_le());
-
+            *dst_chunk = src_chunk.map(u16::from);
             source_offset += 4;
             destination_offset += 4;
         } else {
             match decode_single_from_packed(packed, source_offset) {
                 Some((value, new_src)) => {
-                    *destination.get_unchecked_mut(destination_offset) = value;
+                    dst_chunk[0] = value;
                     source_offset = new_src;
                     destination_offset += 1;
                 }

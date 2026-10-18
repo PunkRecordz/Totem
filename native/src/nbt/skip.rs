@@ -14,81 +14,71 @@ enum ContainerFrame {
 }
 
 #[inline(always)]
-pub unsafe fn advance_ptr(
-    ptr: *const u8,
-    end: *const u8,
-    bytes: usize,
-) -> Result<*const u8, NbtSkipError> {
-    let remaining = (end as usize) - (ptr as usize);
-    if remaining >= bytes {
-        Ok(unsafe { ptr.add(bytes) })
-    } else {
-        Err(NbtSkipError::Truncated)
-    }
+pub fn advance(rem: &[u8], bytes: usize) -> Result<&[u8], NbtSkipError> {
+    rem.get(bytes..).ok_or(NbtSkipError::Truncated)
 }
 
 #[inline(always)]
-pub unsafe fn skip_leaf_tag(
-    type_id: u8,
-    ptr: *const u8,
-    end: *const u8,
-) -> Result<*const u8, NbtSkipError> {
+pub fn read_be_u16(rem: &[u8]) -> Result<(u16, &[u8]), NbtSkipError> {
+    let (bytes, rest) = rem.split_first_chunk::<2>().ok_or(NbtSkipError::Truncated)?;
+    Ok((u16::from_be_bytes(*bytes), rest))
+}
+
+#[inline(always)]
+pub fn read_be_i32(rem: &[u8]) -> Result<(i32, &[u8]), NbtSkipError> {
+    let (bytes, rest) = rem.split_first_chunk::<4>().ok_or(NbtSkipError::Truncated)?;
+    Ok((i32::from_be_bytes(*bytes), rest))
+}
+
+#[inline(always)]
+pub fn skip_leaf_tag(type_id: u8, rem: &[u8]) -> Result<&[u8], NbtSkipError> {
     match type_id {
-        0 => Ok(ptr),
-        1 => unsafe { advance_ptr(ptr, end, 1) },
-        2 => unsafe { advance_ptr(ptr, end, 2) },
-        3 | 5 => unsafe { advance_ptr(ptr, end, 4) },
-        4 | 6 => unsafe { advance_ptr(ptr, end, 8) },
+        0 => Ok(rem),
+        1 => advance(rem, 1),
+        2 => advance(rem, 2),
+        3 | 5 => advance(rem, 4),
+        4 | 6 => advance(rem, 8),
         7 => {
-            let payload = unsafe { advance_ptr(ptr, end, 4)? };
-            let len = i32::from_be(unsafe { core::ptr::read_unaligned(ptr as *const i32) });
+            let (len, payload) = read_be_i32(rem)?;
             if len < 0 {
                 return Err(NbtSkipError::Malformed);
             }
-            unsafe { advance_ptr(payload, end, len as usize) }
+            advance(payload, len as usize)
         }
         8 => {
-            let payload = unsafe { advance_ptr(ptr, end, 2)? };
-            let len = u16::from_be(unsafe { core::ptr::read_unaligned(ptr as *const u16) }) as usize;
-            unsafe { advance_ptr(payload, end, len) }
+            let (len, payload) = read_be_u16(rem)?;
+            advance(payload, len as usize)
         }
         11 => {
-            let payload = unsafe { advance_ptr(ptr, end, 4)? };
-            let len = i32::from_be(unsafe { core::ptr::read_unaligned(ptr as *const i32) });
+            let (len, payload) = read_be_i32(rem)?;
             if len < 0 {
                 return Err(NbtSkipError::Malformed);
             }
             let byte_len = (len as usize)
                 .checked_mul(4)
                 .ok_or(NbtSkipError::Malformed)?;
-            unsafe { advance_ptr(payload, end, byte_len) }
+            advance(payload, byte_len)
         }
         12 => {
-            let payload = unsafe { advance_ptr(ptr, end, 4)? };
-            let len = i32::from_be(unsafe { core::ptr::read_unaligned(ptr as *const i32) });
+            let (len, payload) = read_be_i32(rem)?;
             if len < 0 {
                 return Err(NbtSkipError::Malformed);
             }
             let byte_len = (len as usize)
                 .checked_mul(8)
                 .ok_or(NbtSkipError::Malformed)?;
-            unsafe { advance_ptr(payload, end, byte_len) }
+            advance(payload, byte_len)
         }
         _ => Err(NbtSkipError::Malformed),
     }
 }
 
 #[inline(always)]
-pub unsafe fn validate_matched_tag(
-    type_id: u8,
-    ptr: *const u8,
-    end: *const u8,
-) -> Result<(), NbtSkipError> {
+pub fn validate_matched_tag(type_id: u8, rem: &[u8]) -> Result<(), NbtSkipError> {
     match type_id {
         9 => {
-            let payload = unsafe { advance_ptr(ptr, end, 5)? };
-            let elem_type = unsafe { *ptr };
-            let count = i32::from_be(unsafe { core::ptr::read_unaligned(ptr.add(1) as *const i32) });
+            let (&elem_type, after_type) = rem.split_first().ok_or(NbtSkipError::Truncated)?;
+            let (count, payload) = read_be_i32(after_type)?;
             if count < 0 {
                 return Err(NbtSkipError::Malformed);
             }
@@ -101,57 +91,54 @@ pub unsafe fn validate_matched_tag(
             let ucount = count as usize;
             match elem_type {
                 1 => {
-                    unsafe { advance_ptr(payload, end, ucount)? };
+                    advance(payload, ucount)?;
                 }
                 2 => {
                     let bytes = ucount.checked_mul(2).ok_or(NbtSkipError::Malformed)?;
-                    unsafe { advance_ptr(payload, end, bytes)? };
+                    advance(payload, bytes)?;
                 }
                 3 | 5 => {
                     let bytes = ucount.checked_mul(4).ok_or(NbtSkipError::Malformed)?;
-                    unsafe { advance_ptr(payload, end, bytes)? };
+                    advance(payload, bytes)?;
                 }
                 4 | 6 => {
                     let bytes = ucount.checked_mul(8).ok_or(NbtSkipError::Malformed)?;
-                    unsafe { advance_ptr(payload, end, bytes)? };
+                    advance(payload, bytes)?;
                 }
                 _ => {}
             }
             Ok(())
         }
         10 => {
-            let _ = unsafe { advance_ptr(ptr, end, 1)? };
-            let first_type = unsafe { *ptr };
+            let (&first_type, _) = rem.split_first().ok_or(NbtSkipError::Truncated)?;
             if first_type > 12 {
                 return Err(NbtSkipError::Malformed);
             }
             Ok(())
         }
         _ => {
-            let _ = unsafe { skip_leaf_tag(type_id, ptr, end)? };
+            let _ = skip_leaf_tag(type_id, rem)?;
             Ok(())
         }
     }
 }
 
 #[inline(always)]
-unsafe fn skip_or_push_tag(
+fn skip_or_push_tag<'a>(
     type_id: u8,
-    ptr: *const u8,
-    end: *const u8,
+    rem: &'a [u8],
     depth: &mut u32,
-    stack: &mut [core::mem::MaybeUninit<ContainerFrame>; (MAX_NBT_DEPTH as usize) + 1],
+    stack: &mut [ContainerFrame; (MAX_NBT_DEPTH as usize) + 1],
     stack_len: &mut usize,
-) -> Result<*const u8, NbtSkipError> {
+) -> Result<&'a [u8], NbtSkipError> {
     if *depth > MAX_NBT_DEPTH {
         return Err(NbtSkipError::DepthExceeded);
     }
 
     match type_id {
         9 => {
-            let payload = advance_ptr(ptr, end, 5)?;
-            let elem_type = unsafe { *ptr };
-            let count = i32::from_be(unsafe { core::ptr::read_unaligned(ptr.add(1) as *const i32) });
+            let (&elem_type, after_type) = rem.split_first().ok_or(NbtSkipError::Truncated)?;
+            let (count, payload) = read_be_i32(after_type)?;
             if count < 0 {
                 return Err(NbtSkipError::Malformed);
             }
@@ -166,15 +153,15 @@ unsafe fn skip_or_push_tag(
             }
             let ucount = count as usize;
             match elem_type {
-                1 => advance_ptr(payload, end, ucount),
-                2 => advance_ptr(payload, end, ucount * 2),
-                3 | 5 => advance_ptr(payload, end, ucount * 4),
-                4 | 6 => advance_ptr(payload, end, ucount * 8),
+                1 => advance(payload, ucount),
+                2 => advance(payload, ucount.checked_mul(2).ok_or(NbtSkipError::Malformed)?),
+                3 | 5 => advance(payload, ucount.checked_mul(4).ok_or(NbtSkipError::Malformed)?),
+                4 | 6 => advance(payload, ucount.checked_mul(8).ok_or(NbtSkipError::Malformed)?),
                 _ => {
-                    stack[*stack_len].write(ContainerFrame::List {
+                    stack[*stack_len] = ContainerFrame::List {
                         elem_type,
                         remaining: ucount,
-                    });
+                    };
                     *stack_len += 1;
                     *depth += 1;
                     Ok(payload)
@@ -182,45 +169,40 @@ unsafe fn skip_or_push_tag(
             }
         }
         10 => {
-            stack[*stack_len].write(ContainerFrame::Compound);
+            stack[*stack_len] = ContainerFrame::Compound;
             *stack_len += 1;
             *depth += 1;
-            Ok(ptr)
+            Ok(rem)
         }
-        _ => unsafe { skip_leaf_tag(type_id, ptr, end) },
+        _ => skip_leaf_tag(type_id, rem),
     }
 }
 
 #[inline(always)]
-pub unsafe fn skip_nbt_tag(
+pub fn skip_nbt_tag(
     type_id: u8,
-    ptr: *const u8,
-    end: *const u8,
+    rem: &[u8],
     initial_depth: u32,
-) -> Result<*const u8, NbtSkipError> {
+) -> Result<&[u8], NbtSkipError> {
     if initial_depth > MAX_NBT_DEPTH {
         return Err(NbtSkipError::DepthExceeded);
     }
 
     if type_id != 9 && type_id != 10 {
-        return unsafe { skip_leaf_tag(type_id, ptr, end) };
+        return skip_leaf_tag(type_id, rem);
     }
 
     let mut depth = initial_depth;
-    let mut stack: [core::mem::MaybeUninit<ContainerFrame>; (MAX_NBT_DEPTH as usize) + 1] =
-        unsafe { core::mem::MaybeUninit::uninit().assume_init() };
+    let mut stack = [ContainerFrame::Compound; (MAX_NBT_DEPTH as usize) + 1];
     let mut stack_len: usize = 0;
 
-    let mut curr = unsafe {
-        skip_or_push_tag(type_id, ptr, end, &mut depth, &mut stack, &mut stack_len)?
-    };
+    let mut curr = skip_or_push_tag(type_id, rem, &mut depth, &mut stack, &mut stack_len)?;
 
     while stack_len > 0 {
-        let frame = unsafe { *stack[stack_len - 1].as_ptr() };
+        let frame = stack[stack_len - 1];
         match frame {
             ContainerFrame::Compound => {
-                let after_type = advance_ptr(curr, end, 1)?;
-                let field_type = unsafe { *curr };
+                let (&field_type, after_type) = curr.split_first().ok_or(NbtSkipError::Truncated)?;
                 if field_type == 0 {
                     curr = after_type;
                     stack_len -= 1;
@@ -230,26 +212,30 @@ pub unsafe fn skip_nbt_tag(
                 if field_type > 12 {
                     return Err(NbtSkipError::Malformed);
                 }
-                let after_name_len = advance_ptr(after_type, end, 2)?;
-                let name_len = u16::from_be(unsafe { core::ptr::read_unaligned(after_type as *const u16) }) as usize;
-                let value_ptr = advance_ptr(after_name_len, end, name_len)?;
-                curr = unsafe {
-                    skip_or_push_tag(field_type, value_ptr, end, &mut depth, &mut stack, &mut stack_len)?
-                };
+                let (name_len, after_name_len) = read_be_u16(after_type)?;
+                let value_rem = advance(after_name_len, name_len as usize)?;
+                curr = skip_or_push_tag(
+                    field_type,
+                    value_rem,
+                    &mut depth,
+                    &mut stack,
+                    &mut stack_len,
+                )?;
             }
-            ContainerFrame::List { elem_type, remaining } => {
+            ContainerFrame::List {
+                elem_type,
+                remaining,
+            } => {
                 if remaining == 0 {
                     stack_len -= 1;
                     depth -= 1;
                     continue;
                 }
-                stack[stack_len - 1].write(ContainerFrame::List {
+                stack[stack_len - 1] = ContainerFrame::List {
                     elem_type,
                     remaining: remaining - 1,
-                });
-                curr = unsafe {
-                    skip_or_push_tag(elem_type, curr, end, &mut depth, &mut stack, &mut stack_len)?
                 };
+                curr = skip_or_push_tag(elem_type, curr, &mut depth, &mut stack, &mut stack_len)?;
             }
         }
     }

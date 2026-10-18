@@ -23,25 +23,28 @@ import org.punkrecordz.totem.view.toVarIntShortArray
 import java.lang.foreign.Arena
 import java.util.concurrent.TimeUnit
 import kotlin.io.path.Path
+import kotlin.io.path.createTempDirectory
 import kotlin.io.path.deleteIfExists
 import net.querz.nbt.tag.CompoundTag as QuerzCompoundTag
 
 @State(Scope.Thread)
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.MILLISECONDS)
-@Warmup(iterations = 3, time = 1, timeUnit = TimeUnit.SECONDS)
-@Measurement(iterations = 3, time = 1, timeUnit = TimeUnit.SECONDS)
+@Warmup(iterations = 3, time = 2, timeUnit = TimeUnit.SECONDS)
+@Measurement(iterations = 5, time = 2, timeUnit = TimeUnit.SECONDS)
 @Fork(1)
 open class JmhBenchmarks {
 
     private val schematicPath = Path("src/test/resources/18578.schem")
-    private val tempTotemPath = Path("temp_totem_benchmark.schem")
-    private val tempQuerzPath = Path("temp_querz_benchmark.schem")
+    private val tempDirectory = createTempDirectory("totem-jmh-")
+    private val tempTotemPath = tempDirectory.resolve("temp_totem_benchmark.schem")
+    private val tempQuerzPath = tempDirectory.resolve("temp_querz_benchmark.schem")
 
     @TearDown(Level.Trial)
     fun cleanup() {
         tempTotemPath.deleteIfExists()
         tempQuerzPath.deleteIfExists()
+        tempDirectory.deleteIfExists()
     }
 
     @Benchmark

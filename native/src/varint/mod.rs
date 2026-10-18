@@ -1,6 +1,8 @@
 pub mod decode;
+#[forbid(unsafe_code)]
 mod decode_swar;
 pub mod encode;
+#[forbid(unsafe_code)]
 mod encode_swar;
 pub mod partition;
 pub mod size;

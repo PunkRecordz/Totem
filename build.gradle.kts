@@ -7,7 +7,7 @@ plugins {
 }
 
 group = "org.punkrecordz"
-version = "2.0.1"
+version = "2.0.2"
 
 java {
     withSourcesJar()
@@ -102,17 +102,17 @@ tasks.named<Jar>("sourcesJar") {
 }
 
 tasks.test {
-    dependsOn("compileRust")
+    dependsOn(copyNativeLibrary, tasks.processResources)
     useJUnitPlatform()
     jvmArgs(
         "--enable-native-access=ALL-UNNAMED",
         "--add-opens", "java.base/jdk.internal.foreign=ALL-UNNAMED",
-        "--add-modules", "jdk.incubator.vector"
+        "--add-modules", "jdk.incubator.vector",
     )
 }
 
 tasks.register<JavaExec>("runJmh") {
-    dependsOn("compileRust")
+    dependsOn(copyNativeLibrary, tasks.processResources, tasks.testClasses)
     classpath = sourceSets["test"].runtimeClasspath
     mainClass = "org.punkrecordz.totem.JmhBenchmarks"
     jvmArgs(
@@ -121,11 +121,12 @@ tasks.register<JavaExec>("runJmh") {
         "--add-modules", "jdk.incubator.vector",
         "-Xms6g",
         "-Xmx8g",
+        "-XX:+AlwaysPreTouch",
     )
 }
 
 tasks.register<JavaExec>("runVarIntJmh") {
-    dependsOn("compileRust")
+    dependsOn(copyNativeLibrary, tasks.processResources, tasks.testClasses)
     classpath = sourceSets["test"].runtimeClasspath
     mainClass = "org.punkrecordz.totem.VarIntBenchmarks"
     jvmArgs(
@@ -133,7 +134,8 @@ tasks.register<JavaExec>("runVarIntJmh") {
         "--add-opens", "java.base/jdk.internal.foreign=ALL-UNNAMED",
         "--add-modules", "jdk.incubator.vector",
         "-Xms6g",
-        "-Xmx8g"
+        "-Xmx8g",
+        "-XX:+AlwaysPreTouch",
     )
 }
 

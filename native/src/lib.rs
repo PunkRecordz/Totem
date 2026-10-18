@@ -1,9 +1,8 @@
-#![allow(unsafe_op_in_unsafe_fn)]
-
 pub mod bitpack;
 pub mod gzip;
 pub mod nbt;
 pub mod shorts;
+mod simd;
 pub mod varint;
 
 pub use bitpack::{

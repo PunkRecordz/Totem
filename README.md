@@ -41,13 +41,13 @@ Instead of deserializing binary payloads into heap objects, Totem maps NBT struc
 
 End-to-end NBT pipeline (loading a compressed schematic of 44 million blocks (`18578.schem`), replacing block IDs across the volume, and saving back to a GZIP file):
 
-| Library / Pipeline | Avg Time / Operation | Performance vs Querz |
-| :--- | :--- | :--- |
-| **Querz NBT** (Standard Java NBT) | 1,797.60 ms | Baseline |
-| **Totem 1.0.2** | 325.79 ms | 5.52x Faster |
-| **Totem 2.0.1** | **92.90 ms** | **19.35x Faster** |
+| Library / Pipeline | Avg Time (`ms/op`) | Error (99.9% CI) | Min – Max (`ms`) | StdDev (`σ`) | Performance vs Querz |
+| :--- | ---: | ---: | ---: | ---: | :--- |
+| **Querz NBT** (Standard Java NBT) | 929.20 ms | ± 130.61 ms | 899.80 – 970.90 ms | 33.92 ms | Baseline (`1.00x`) |
+| **Totem 1.0.2** | 216.19 ms | ± 46.86 ms | 201.51 – 231.03 ms | 12.17 ms | 4.30x Faster |
+| **Totem 2.0.2** | **76.93 ms** | **± 11.87 ms** | **72.17 – 80.50 ms** | **3.08 ms** | **12.08x Faster** |
 
-*Measured on JDK 24 (HotSpot 64-Bit Server VM).*
+*Measured with JMH 1.37 (`5 × 2s` measurement iterations, `3 × 2s` warmup, `-Xms6g -Xmx8g -XX:+AlwaysPreTouch`) on an **AMD Ryzen 7 6800HS** (8 cores / 16 threads) running JDK 24.0.1 (HotSpot 64-Bit Server VM).*
 
 ### 1 Billion Blocks Schematic Conversion
 
@@ -78,7 +78,7 @@ repositories {
 }
 
 dependencies {
-    implementation("org.punkrecordz:totem:2.0.1")
+    implementation("org.punkrecordz:totem:2.0.2")
 }
 ```
 

@@ -1,6 +1,7 @@
+#[forbid(unsafe_code)]
 mod skip;
 
-use skip::{advance_ptr, skip_nbt_tag, validate_matched_tag, NbtSkipError};
+use skip::{read_be_u16, skip_nbt_tag, validate_matched_tag, NbtSkipError};
 
 /// Calculates the exact byte size of an NBT compound tag starting at `ptr`.
 /// Returns the size in bytes including the trailing Tag_End (0), -1 if truncated, -2 if malformed, or -3 if depth exceeded.
@@ -9,9 +10,9 @@ pub unsafe extern "C" fn calculate_compound_size(ptr: *const u8, max_len: u64) -
     if ptr.is_null() || max_len == 0 {
         return 0;
     }
-    let end = unsafe { ptr.add(max_len as usize) };
-    match unsafe { skip_nbt_tag(10, ptr, end, 0) } {
-        Ok(after) => (after as usize - ptr as usize) as i64,
+    let data = unsafe { core::slice::from_raw_parts(ptr, max_len as usize) };
+    match skip_nbt_tag(10, data, 0) {
+        Ok(after) => (data.len() - after.len()) as i64,
         Err(NbtSkipError::Truncated) => -1,
         Err(NbtSkipError::Malformed) => -2,
         Err(NbtSkipError::DepthExceeded) => -3,
@@ -26,9 +27,9 @@ pub unsafe extern "C" fn calculate_list_size(ptr: *const u8, max_len: u64) -> i6
     if ptr.is_null() || max_len < 5 {
         return -1;
     }
-    let end = unsafe { ptr.add(max_len as usize) };
-    match unsafe { skip_nbt_tag(9, ptr, end, 0) } {
-        Ok(after) => (after as usize - ptr as usize) as i64,
+    let data = unsafe { core::slice::from_raw_parts(ptr, max_len as usize) };
+    match skip_nbt_tag(9, data, 0) {
+        Ok(after) => (data.len() - after.len()) as i64,
         Err(NbtSkipError::Truncated) => -1,
         Err(NbtSkipError::Malformed) => -2,
         Err(NbtSkipError::DepthExceeded) => -3,
@@ -48,36 +49,36 @@ pub unsafe extern "C" fn find_compound_entry(
     if ptr.is_null() || max_len == 0 || key_ptr.is_null() {
         return -1;
     }
-    let end = unsafe { ptr.add(max_len as usize) };
+    let data = unsafe { core::slice::from_raw_parts(ptr, max_len as usize) };
     let key = unsafe { core::slice::from_raw_parts(key_ptr, key_len as usize) };
-    let mut curr = ptr;
+    find_compound_entry_slice(data, key)
+}
+
+fn find_compound_entry_slice(data: &[u8], key: &[u8]) -> i64 {
+    let mut curr = data;
 
     loop {
-        let after_type = match unsafe { advance_ptr(curr, end, 1) } {
-            Ok(next) => next,
-            Err(_) => return -1,
+        let Some((&field_type, after_type)) = curr.split_first() else {
+            return -1;
         };
-        let field_type = unsafe { *curr };
         if field_type == 0 {
             return -1;
         }
         if field_type > 12 {
             return -2;
         }
-        let name_ptr = match unsafe { advance_ptr(after_type, end, 2) } {
-            Ok(next) => next,
-            Err(_) => return -1,
+        let Ok((name_len, name_and_rest)) = read_be_u16(after_type) else {
+            return -1;
         };
-        let name_len = u16::from_be(unsafe { core::ptr::read_unaligned(after_type as *const u16) }) as usize;
-        let value_ptr = match unsafe { advance_ptr(name_ptr, end, name_len) } {
-            Ok(next) => next,
-            Err(_) => return -1,
+        let name_len = name_len as usize;
+        let Some((name_bytes, value_rem)) = name_and_rest.split_at_checked(name_len) else {
+            return -1;
         };
 
-        if name_len == key.len() && unsafe { core::slice::from_raw_parts(name_ptr, name_len) } == key {
-            match unsafe { validate_matched_tag(field_type, value_ptr, end) } {
+        if name_bytes == key {
+            match validate_matched_tag(field_type, value_rem) {
                 Ok(()) => {
-                    let offset = value_ptr as usize - ptr as usize;
+                    let offset = data.len() - value_rem.len();
                     return ((field_type as i64) << 48) | (offset as i64);
                 }
                 Err(NbtSkipError::Truncated) => return -1,
@@ -86,7 +87,7 @@ pub unsafe extern "C" fn find_compound_entry(
             }
         }
 
-        match unsafe { skip_nbt_tag(field_type, value_ptr, end, 1) } {
+        match skip_nbt_tag(field_type, value_rem, 1) {
             Ok(next) => curr = next,
             Err(NbtSkipError::Truncated) => return -1,
             Err(NbtSkipError::Malformed) => return -2,
@@ -132,7 +133,7 @@ mod tests {
         let type_x = (res_x >> 48) as u8;
         let offset_x = (res_x & 0x0000FFFFFFFFFFFF) as usize;
         assert_eq!(type_x, 3);
-        let val_x = i32::from_be(unsafe { core::ptr::read_unaligned(nbt.as_ptr().add(offset_x) as *const i32) });
+        let val_x = i32::from_be_bytes(nbt[offset_x..offset_x + 4].try_into().unwrap());
         assert_eq!(val_x, 42);
 
         let res_name = unsafe { find_compound_entry(nbt.as_ptr(), nbt.len() as u64, b"name".as_ptr(), 4) };
@@ -140,7 +141,7 @@ mod tests {
         let type_name = (res_name >> 48) as u8;
         let offset_name = (res_name & 0x0000FFFFFFFFFFFF) as usize;
         assert_eq!(type_name, 8);
-        let str_len = u16::from_be(unsafe { core::ptr::read_unaligned(nbt.as_ptr().add(offset_name) as *const u16) });
+        let str_len = u16::from_be_bytes(nbt[offset_name..offset_name + 2].try_into().unwrap());
         assert_eq!(str_len, 5);
 
         let res_missing = unsafe { find_compound_entry(nbt.as_ptr(), nbt.len() as u64, b"missing".as_ptr(), 7) };

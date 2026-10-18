@@ -1,56 +1,52 @@
 use super::element::{decode_u64, UnpackElement};
 
 #[inline(always)]
-unsafe fn unpack_padded_const<T: UnpackElement, const BITS: usize, const BIG_ENDIAN: bool>(
-    source_longs: *const u64,
-    longs_count: usize,
-    destination: *mut T,
-    element_count: usize,
+fn unpack_padded_const<T: UnpackElement, const BITS: usize, const BIG_ENDIAN: bool>(
+    source_longs: &[u64],
+    destination: &mut [T],
 ) -> usize {
     let entries_per_long = 64 / BITS;
     let mask: u64 = if BITS == 64 { u64::MAX } else { (1u64 << BITS) - 1 };
-    let unpacked_size = core::cmp::min(longs_count.saturating_mul(entries_per_long), element_count);
-    let full_words = unpacked_size / entries_per_long;
-    let remainder = unpacked_size % entries_per_long;
+    let unpacked_size = core::cmp::min(
+        source_longs.len().saturating_mul(entries_per_long),
+        destination.len(),
+    );
 
-    for word_index in 0..full_words {
-        let word = decode_u64::<BIG_ENDIAN>(unsafe { source_longs.add(word_index).read_unaligned() });
-        let out_base = unsafe { destination.add(word_index * entries_per_long) };
+    let mut out_chunks = destination[..unpacked_size].chunks_exact_mut(entries_per_long);
+    let mut word_iter = source_longs.iter();
 
-        for entry_index in 0..entries_per_long {
+    for (out_chunk, &raw_word) in (&mut out_chunks).zip(&mut word_iter) {
+        let word = decode_u64::<BIG_ENDIAN>(raw_word);
+
+        for (entry_index, slot) in out_chunk.iter_mut().enumerate() {
             let value = (word >> (entry_index * BITS)) & mask;
-            unsafe { out_base.add(entry_index).write_unaligned(T::from_u64(value)) };
+            *slot = T::from_u64(value);
         }
     }
 
-    if remainder > 0 {
-        let word = decode_u64::<BIG_ENDIAN>(unsafe { source_longs.add(full_words).read_unaligned() });
-        let out_base = unsafe { destination.add(full_words * entries_per_long) };
+    let remainder = out_chunks.into_remainder();
+    if !remainder.is_empty() {
+        if let Some(&raw_word) = word_iter.next() {
+            let word = decode_u64::<BIG_ENDIAN>(raw_word);
 
-        for entry_index in 0..remainder {
-            let value = (word >> (entry_index * BITS)) & mask;
-            unsafe { out_base.add(entry_index).write_unaligned(T::from_u64(value)) };
+            for (entry_index, slot) in remainder.iter_mut().enumerate() {
+                let value = (word >> (entry_index * BITS)) & mask;
+                *slot = T::from_u64(value);
+            }
         }
     }
 
-    for index in unpacked_size..element_count {
-        unsafe { destination.add(index).write_unaligned(T::ZERO) };
-    }
-
+    destination[unpacked_size..].fill(T::ZERO);
     unpacked_size
 }
 
 #[inline(always)]
-unsafe fn unpack_spanning_const<T: UnpackElement, const BITS: usize, const BIG_ENDIAN: bool>(
-    source_longs: *const u64,
-    longs_count: usize,
-    destination: *mut T,
-    element_count: usize,
+fn unpack_spanning_const<T: UnpackElement, const BITS: usize, const BIG_ENDIAN: bool>(
+    source_longs: &[u64],
+    destination: &mut [T],
 ) -> usize {
     if 64 % BITS == 0 {
-        return unsafe {
-            unpack_padded_const::<T, BITS, BIG_ENDIAN>(source_longs, longs_count, destination, element_count)
-        };
+        return unpack_padded_const::<T, BITS, BIG_ENDIAN>(source_longs, destination);
     }
 
     let mask: u64 = (1u64 << BITS) - 1;
@@ -58,33 +54,33 @@ unsafe fn unpack_spanning_const<T: UnpackElement, const BITS: usize, const BIG_E
     let mut out_index = 0;
     let mut word_index = 0;
     let mut bit_offset = 0;
-    let mut current_word = if longs_count > 0 {
+    let mut current_word = if let Some(&first) = source_longs.first() {
         word_index = 1;
-        decode_u64::<BIG_ENDIAN>(unsafe { source_longs.read_unaligned() })
+        decode_u64::<BIG_ENDIAN>(first)
     } else {
         0
     };
 
-    while out_index + min_in_word + 2 <= element_count && word_index < longs_count {
+    while out_index + min_in_word + 2 <= destination.len() && word_index < source_longs.len() {
         let shifted = current_word >> bit_offset;
-        let out_base = unsafe { destination.add(out_index) };
+        let out_window = &mut destination[out_index..out_index + min_in_word + 2];
 
-        for step in 0..min_in_word {
+        for (step, slot) in out_window[..min_in_word].iter_mut().enumerate() {
             let value = (shifted >> (step * BITS)) & mask;
-            unsafe { out_base.add(step).write_unaligned(T::from_u64(value)) };
+            *slot = T::from_u64(value);
         }
 
-        out_index += min_in_word;
+        let mut local_out = min_in_word;
         bit_offset += min_in_word * BITS;
 
         if bit_offset + BITS <= 64 {
             let value = (current_word >> bit_offset) & mask;
-            unsafe { destination.add(out_index).write_unaligned(T::from_u64(value)) };
-            out_index += 1;
+            out_window[local_out] = T::from_u64(value);
+            local_out += 1;
             bit_offset += BITS;
         }
 
-        let next_word = decode_u64::<BIG_ENDIAN>(unsafe { source_longs.add(word_index).read_unaligned() });
+        let next_word = decode_u64::<BIG_ENDIAN>(source_longs[word_index]);
         word_index += 1;
 
         if bit_offset == 64 {
@@ -92,141 +88,122 @@ unsafe fn unpack_spanning_const<T: UnpackElement, const BITS: usize, const BIG_E
             bit_offset = 0;
         } else {
             let value = ((current_word >> bit_offset) | (next_word << (64 - bit_offset))) & mask;
-            unsafe { destination.add(out_index).write_unaligned(T::from_u64(value)) };
-            out_index += 1;
+            out_window[local_out] = T::from_u64(value);
+            local_out += 1;
             current_word = next_word;
             bit_offset = (bit_offset + BITS) - 64;
         }
+
+        out_index += local_out;
     }
 
-    unsafe {
-        unpack_spanning_tail::<T, BIG_ENDIAN>(
-            source_longs,
-            longs_count,
-            destination,
-            element_count,
-            BITS,
-            mask,
-            out_index,
-            word_index,
-            current_word,
-            bit_offset,
-        )
-    }
+    unpack_spanning_tail::<T, BIG_ENDIAN>(
+        &source_longs[word_index..],
+        &mut destination[out_index..],
+        BITS,
+        mask,
+        current_word,
+        bit_offset,
+    );
+
+    destination.len()
 }
 
 #[inline(always)]
-unsafe fn unpack_spanning_tail<T: UnpackElement, const BIG_ENDIAN: bool>(
-    source_longs: *const u64,
-    longs_count: usize,
-    destination: *mut T,
-    element_count: usize,
+fn unpack_spanning_tail<T: UnpackElement, const BIG_ENDIAN: bool>(
+    remaining_longs: &[u64],
+    remaining_destination: &mut [T],
     bits_per_entry: usize,
     mask: u64,
-    mut out_index: usize,
-    mut word_index: usize,
     mut current_word: u64,
     mut bit_offset: usize,
-) -> usize {
-    while out_index < element_count {
+) {
+    let mut word_iter = remaining_longs.iter();
+
+    for slot in remaining_destination.iter_mut() {
         let value: u64;
         if bit_offset + bits_per_entry <= 64 {
             value = (current_word >> bit_offset) & mask;
             bit_offset += bits_per_entry;
             if bit_offset == 64 {
                 bit_offset = 0;
-                current_word = if word_index < longs_count {
-                    let next = decode_u64::<BIG_ENDIAN>(unsafe { source_longs.add(word_index).read_unaligned() });
-                    word_index += 1;
-                    next
-                } else {
-                    0
-                };
+                current_word = word_iter
+                    .next()
+                    .map_or(0, |&raw| decode_u64::<BIG_ENDIAN>(raw));
             }
         } else {
-            let next_word = if word_index < longs_count {
-                let next = decode_u64::<BIG_ENDIAN>(unsafe { source_longs.add(word_index).read_unaligned() });
-                word_index += 1;
-                next
-            } else {
-                0
-            };
+            let next_word = word_iter
+                .next()
+                .map_or(0, |&raw| decode_u64::<BIG_ENDIAN>(raw));
             value = ((current_word >> bit_offset) | (next_word << (64 - bit_offset))) & mask;
             current_word = next_word;
             bit_offset = (bit_offset + bits_per_entry) - 64;
         }
 
-        unsafe { destination.add(out_index).write_unaligned(T::from_u64(value)) };
-        out_index += 1;
+        *slot = T::from_u64(value);
     }
-
-    element_count
 }
 
 #[inline(always)]
-unsafe fn unpack_runtime<T: UnpackElement, const BIG_ENDIAN: bool>(
-    source_longs: *const u64,
-    longs_count: usize,
-    destination: *mut T,
-    element_count: usize,
+fn unpack_runtime<T: UnpackElement, const BIG_ENDIAN: bool>(
+    source_longs: &[u64],
+    destination: &mut [T],
     bits_per_entry: usize,
     precise: bool,
 ) -> usize {
-    let mask: u64 = if bits_per_entry >= 64 { u64::MAX } else { (1u64 << bits_per_entry) - 1 };
+    let mask: u64 = if bits_per_entry >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << bits_per_entry) - 1
+    };
 
     if !precise {
         let entries_per_long = 64 / bits_per_entry;
-        let unpacked_size = core::cmp::min(longs_count.saturating_mul(entries_per_long), element_count);
-        let mut out_index = 0;
+        let unpacked_size = core::cmp::min(
+            source_longs.len().saturating_mul(entries_per_long),
+            destination.len(),
+        );
+        let mut out_iter = destination[..unpacked_size].iter_mut();
 
-        for word_index in 0..longs_count {
-            let word = decode_u64::<BIG_ENDIAN>(unsafe { source_longs.add(word_index).read_unaligned() });
+        for &raw_word in source_longs {
+            let word = decode_u64::<BIG_ENDIAN>(raw_word);
             let mut bit_index = 0;
 
             for _ in 0..entries_per_long {
-                if out_index >= unpacked_size {
+                let Some(slot) = out_iter.next() else {
                     break;
-                }
-                unsafe { destination.add(out_index).write_unaligned(T::from_u64((word >> bit_index) & mask)) };
+                };
+                *slot = T::from_u64((word >> bit_index) & mask);
                 bit_index += bits_per_entry;
-                out_index += 1;
             }
         }
 
-        for index in unpacked_size..element_count {
-            unsafe { destination.add(index).write_unaligned(T::ZERO) };
-        }
-
+        destination[unpacked_size..].fill(T::ZERO);
         return unpacked_size;
     }
 
-    let (word_index, current_word) = if longs_count > 0 {
-        (1, decode_u64::<BIG_ENDIAN>(unsafe { source_longs.read_unaligned() }))
+    let (remaining_longs, current_word) = if let Some((&first, rest)) = source_longs.split_first()
+    {
+        (rest, decode_u64::<BIG_ENDIAN>(first))
     } else {
-        (0, 0)
+        (&[][..], 0)
     };
 
-    unsafe {
-        unpack_spanning_tail::<T, BIG_ENDIAN>(
-            source_longs,
-            longs_count,
-            destination,
-            element_count,
-            bits_per_entry,
-            mask,
-            0,
-            word_index,
-            current_word,
-            0,
-        )
-    }
+    unpack_spanning_tail::<T, BIG_ENDIAN>(
+        remaining_longs,
+        destination,
+        bits_per_entry,
+        mask,
+        current_word,
+        0,
+    );
+
+    destination.len()
 }
 
-pub unsafe fn unpack_elements_dispatch<T: UnpackElement, const BIG_ENDIAN: bool>(
-    source_longs: *const u64,
-    longs_count: usize,
-    destination: *mut T,
-    element_count: usize,
+pub fn unpack_elements_dispatch<T: UnpackElement, const BIG_ENDIAN: bool>(
+    source_longs: &[u64],
+    destination: &mut [T],
     bits_per_entry: usize,
     precise: bool,
 ) -> usize {
@@ -235,12 +212,12 @@ pub unsafe fn unpack_elements_dispatch<T: UnpackElement, const BIG_ENDIAN: bool>
             match bits_per_entry {
                 $(
                     $b => if precise {
-                        unsafe { unpack_spanning_const::<T, $b, BIG_ENDIAN>(source_longs, longs_count, destination, element_count) }
+                        unpack_spanning_const::<T, $b, BIG_ENDIAN>(source_longs, destination)
                     } else {
-                        unsafe { unpack_padded_const::<T, $b, BIG_ENDIAN>(source_longs, longs_count, destination, element_count) }
+                        unpack_padded_const::<T, $b, BIG_ENDIAN>(source_longs, destination)
                     },
                 )*
-                _ => unsafe { unpack_runtime::<T, BIG_ENDIAN>(source_longs, longs_count, destination, element_count, bits_per_entry, precise) },
+                _ => unpack_runtime::<T, BIG_ENDIAN>(source_longs, destination, bits_per_entry, precise),
             }
         };
     }
