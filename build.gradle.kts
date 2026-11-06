@@ -2,7 +2,7 @@ import org.gradle.internal.os.OperatingSystem
 
 plugins {
     alias(libs.plugins.kotlin.jvm)
-    kotlin("kapt") version "2.3.20"
+    alias(libs.plugins.kotlin.kapt)
     `maven-publish`
 }
 
@@ -41,7 +41,6 @@ repositories {
 
 dependencies {
     implementation(libs.kotlin.stdlib)
-    implementation(libs.jlibdeflate)
 
     testImplementation(libs.querz.nbt)
     testImplementation(libs.kotlin.test)
@@ -104,11 +103,7 @@ tasks.named<Jar>("sourcesJar") {
 tasks.test {
     dependsOn(copyNativeLibrary, tasks.processResources)
     useJUnitPlatform()
-    jvmArgs(
-        "--enable-native-access=ALL-UNNAMED",
-        "--add-opens", "java.base/jdk.internal.foreign=ALL-UNNAMED",
-        "--add-modules", "jdk.incubator.vector",
-    )
+    jvmArgs("--enable-native-access=ALL-UNNAMED")
 }
 
 tasks.register<JavaExec>("runJmh") {
@@ -117,8 +112,6 @@ tasks.register<JavaExec>("runJmh") {
     mainClass = "org.punkrecordz.totem.JmhBenchmarks"
     jvmArgs(
         "--enable-native-access=ALL-UNNAMED",
-        "--add-opens", "java.base/jdk.internal.foreign=ALL-UNNAMED",
-        "--add-modules", "jdk.incubator.vector",
         "-Xms6g",
         "-Xmx8g",
         "-XX:+AlwaysPreTouch",
@@ -131,8 +124,6 @@ tasks.register<JavaExec>("runVarIntJmh") {
     mainClass = "org.punkrecordz.totem.VarIntBenchmarks"
     jvmArgs(
         "--enable-native-access=ALL-UNNAMED",
-        "--add-opens", "java.base/jdk.internal.foreign=ALL-UNNAMED",
-        "--add-modules", "jdk.incubator.vector",
         "-Xms6g",
         "-Xmx8g",
         "-XX:+AlwaysPreTouch",
@@ -142,7 +133,3 @@ tasks.register<JavaExec>("runVarIntJmh") {
 kotlin {
     jvmToolchain(24)
 }
-
-
-
-

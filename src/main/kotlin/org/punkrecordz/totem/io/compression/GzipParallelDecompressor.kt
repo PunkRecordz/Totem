@@ -1,153 +1,232 @@
 package org.punkrecordz.totem.io.compression
 
-import com.fulcrumgenomics.jlibdeflate.LibdeflateDecompressor
-import org.punkrecordz.totem.concurrent.TotemThreadPool
+import org.punkrecordz.totem.ffi.TotemCodecSys
 import org.punkrecordz.totem.ffi.TotemSys
-import org.punkrecordz.totem.io.ByteBufferInputStream
 import org.punkrecordz.totem.io.allocateUninitialized
-import org.punkrecordz.totem.io.stream.NativeByteArrayOutputStream
-import java.io.EOFException
 import java.lang.foreign.Arena
 import java.lang.foreign.MemorySegment
 import java.lang.foreign.ValueLayout
+import java.lang.ref.Reference
 import java.nio.ByteOrder
-import java.util.concurrent.Callable
-import java.util.zip.GZIPInputStream
 
 internal object GzipParallelDecompressor {
 
-    private val gzipDecompressor = ThreadLocal.withInitial { LibdeflateDecompressor() }
+    private const val MIN_GZIP_MEMBER_BYTES: Long = 18L
+    private const val DIRECT_SINGLE_MEMBER_INPUT_LIMIT_BYTES: Long = 64L * 1024L
+    private const val MAX_SPECULATIVE_ALLOCATION_BYTES: Long = 512L * 1024L * 1024L
+    private const val MAX_DEFLATE_EXPANSION_RATIO: Long = 1032L
+
+    private val LITTLE_ENDIAN_INT: ValueLayout.OfInt =
+        ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN)
 
     fun decompress(
         input: MemorySegment,
         arena: Arena,
+    ): MemorySegment = decompressInternal(input, targetArena = arena)
+
+    fun decompressTransient(input: MemorySegment): MemorySegment =
+        decompressInternal(input, targetArena = null)
+
+    private fun decompressInternal(
+        input: MemorySegment,
+        targetArena: Arena?,
     ): MemorySegment {
         val inputSize = input.byteSize()
-
-        require(inputSize >= 8L) {
-            "Input GZIP segment size ($inputSize) is too short to contain a valid GZIP trailer"
+        require(inputSize >= MIN_GZIP_MEMBER_BYTES) {
+            "Input GZIP segment size ($inputSize bytes) is shorter than minimum 18-byte GZIP member"
         }
 
-        val uncompressedSize = input.get(
-            ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN),
-            inputSize - 4L,
-        ).toLong() and 0xFFFFFFFFL
+        val scratch = CompressionScratch.get()
+        val nativeInput = scratch.nativeSource(input)
 
-        if (uncompressedSize < Int.MAX_VALUE) {
-            try {
-                val output = arena.allocateUninitialized(uncompressedSize)
-                val decompressor = gzipDecompressor.get()
+        try {
+            val trailerUncompressedSize = nativeInput.get(LITTLE_ENDIAN_INT, inputSize - 4L).toLong() and 0xFFFFFFFFL
+            val maxSpeculativeBytes = maxSpeculativeBytesFor(inputSize)
 
-                val inputBuffer = input.asByteBuffer()
-                val outputBuffer = output.asByteBuffer()
-
-                try {
-                    decompressor.gzipDecompress(inputBuffer, outputBuffer, uncompressedSize.toInt())
-
-                    if (!inputBuffer.hasRemaining()) {
-                        return output.asSlice(0L, uncompressedSize)
-                    }
-                } catch (exception: Exception) {
-                    if (exception is EOFException) {
-                        return output.asSlice(0L, outputBuffer.position().toLong())
-                    }
+            if (
+                inputSize <= DIRECT_SINGLE_MEMBER_INPUT_LIMIT_BYTES &&
+                trailerUncompressedSize <= minOf(CompressionScratch.MAX_OUTPUT_CAPACITY_BYTES, maxSpeculativeBytes)
+            ) {
+                val singleMemberSlice = tryDecompressSingleMemberToScratch(
+                    nativeInput = nativeInput,
+                    trailerUncompressedSize = trailerUncompressedSize,
+                    scratch = scratch,
+                )
+                if (singleMemberSlice != null) {
+                    return copyToTargetOrReturnSlice(singleMemberSlice, targetArena)
                 }
-            } catch (_: Exception) {
             }
-        }
 
-        return decompressMultiMember(input, arena)
+            return decompressScannedOrStreaming(
+                nativeInput = nativeInput,
+                targetArena = targetArena,
+                scratch = scratch,
+                maxSpeculativeBytes = maxSpeculativeBytes,
+            )
+        } finally {
+            Reference.reachabilityFence(input)
+            Reference.reachabilityFence(nativeInput)
+        }
     }
 
-    private fun decompressMultiMember(
-        input: MemorySegment,
-        arena: Arena,
+    private fun tryDecompressSingleMemberToScratch(
+        nativeInput: MemorySegment,
+        trailerUncompressedSize: Long,
+        scratch: CompressionScratch,
+    ): MemorySegment? {
+        val inputSize = nativeInput.byteSize()
+        if (trailerUncompressedSize > scratch.outputCapacity) {
+            scratch.ensureOutputCapacity(trailerUncompressedSize)
+        }
+
+        while (true) {
+            val producedBytes = TotemCodecSys.inflate(
+                TotemCodecSys.FORMAT_GZIP,
+                nativeInput,
+                scratch.outputSegment,
+                scratch.consumedBytesSegment,
+            )
+
+            when {
+                producedBytes >= 0L -> return when (scratch.consumedBytes) {
+                    inputSize -> scratch.outputSegment.asSlice(0L, producedBytes)
+                    else -> null
+                }
+                producedBytes == TotemCodecSys.STATUS_INSUFFICIENT_SPACE && scratch.growOutputCapacity() -> continue
+                else -> return null
+            }
+        }
+    }
+
+    private fun decompressScannedOrStreaming(
+        nativeInput: MemorySegment,
+        targetArena: Arena?,
+        scratch: CompressionScratch,
+        maxSpeculativeBytes: Long,
     ): MemorySegment {
-        try {
-            val memberOffsets = TotemSys.scanGzipMemberOffsets(input, 1024)
-            val memberCount = memberOffsets.size
+        val inputSize = nativeInput.byteSize()
+        val offsetsSegment = scratch.gzipMemberOffsetsSegment
+        val memberCount = TotemSys.scanGzipMembers(
+            nativeInput,
+            offsetsSegment,
+            CompressionScratch.MAX_SCANNED_GZIP_MEMBERS,
+        )
 
-            if (memberCount <= 1) {
-                return decompressRobust(input, arena)
-            }
+        val firstOffsetValid = memberCount > 0 && offsetsSegment.get(ValueLayout.JAVA_LONG_UNALIGNED, 0L) == 0L
 
-            val inputSize = input.byteSize()
-            val memberSizes = LongArray(memberCount)
-            var totalUncompressedSize = 0L
+        if (firstOffsetValid && memberCount == 1 && inputSize <= Int.MAX_VALUE.toLong()) {
+            val expectedSize = nativeInput.get(LITTLE_ENDIAN_INT, inputSize - 4L).toLong() and 0xFFFFFFFFL
 
-            for (index in 0 until memberCount) {
-                val memberEndOffset = if (index + 1 < memberCount) memberOffsets[index + 1] else inputSize
-                val uncompressedMemberSize = input.get(
-                    ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN),
-                    memberEndOffset - 4L,
-                ).toLong() and 0xFFFFFFFFL
-
-                memberSizes[index] = uncompressedMemberSize
-                totalUncompressedSize += uncompressedMemberSize
-            }
-
-            val output = arena.allocateUninitialized(totalUncompressedSize)
-            val memberDestinationOffsets = LongArray(memberCount)
-            var currentDestinationOffset = 0L
-
-            for (index in 0 until memberCount) {
-                memberDestinationOffsets[index] = currentDestinationOffset
-                currentDestinationOffset += memberSizes[index]
-            }
-
-            val tasks = (0 until memberCount).map { index ->
-                val start = memberOffsets[index]
-                val end = if (index + 1 < memberCount) memberOffsets[index + 1] else inputSize
-                val inputLength = end - start
-                val outputOffset = memberDestinationOffsets[index]
-                val outputSize = memberSizes[index]
-
-                Callable {
-                    val decompressor = gzipDecompressor.get()
-                    val inputSlice = input.asSlice(start, inputLength)
-                    val outputSlice = output.asSlice(outputOffset, outputSize)
-
-                    decompressor.gzipDecompress(
-                        inputSlice.asByteBuffer(),
-                        outputSlice.asByteBuffer(),
-                        outputSize.toInt(),
+            when {
+                expectedSize == 0L -> {
+                    val producedBytes = TotemCodecSys.inflate(
+                        TotemCodecSys.FORMAT_GZIP,
+                        nativeInput,
+                        scratch.outputSegment,
+                        scratch.consumedBytesSegment,
                     )
+                    if (producedBytes >= 0L && scratch.consumedBytes == inputSize) {
+                        return copyToTargetOrReturnSlice(scratch.outputSegment.asSlice(0L, producedBytes), targetArena)
+                    }
+                }
+                expectedSize <= maxSpeculativeBytes -> {
+                    val outputSegment = allocateTarget(expectedSize, targetArena, scratch)
+                    val producedBytes = TotemCodecSys.inflate(
+                        TotemCodecSys.FORMAT_GZIP,
+                        nativeInput,
+                        outputSegment,
+                        scratch.consumedBytesSegment,
+                    )
+                    if (producedBytes >= 0L && scratch.consumedBytes == inputSize) {
+                        return outputSegment.asSlice(0L, producedBytes)
+                    }
                 }
             }
-
-            val futures = TotemThreadPool.executor.invokeAll(tasks)
-            for (future in futures) {
-                future.get()
-            }
-
-            return output
-        } catch (_: Exception) {
-            return decompressRobust(input, arena)
         }
+
+        if (firstOffsetValid && memberCount in 2 until CompressionScratch.MAX_SCANNED_GZIP_MEMBERS) {
+            val totalUncompressedSize = sumMemberUncompressedSizes(nativeInput, offsetsSegment, memberCount)
+            if (totalUncompressedSize in 0L..maxSpeculativeBytes) {
+                val outputSegment = allocateTarget(totalUncompressedSize, targetArena, scratch)
+                val producedBytes = TotemCodecSys.gzipInflateMembers(
+                    source = nativeInput,
+                    memberOffsets = offsetsSegment,
+                    memberCount = memberCount,
+                    destination = outputSegment,
+                )
+
+                if (producedBytes == totalUncompressedSize) {
+                    return outputSegment
+                }
+            }
+        }
+
+        return GzipStreamFallback.decompressStreaming(nativeInput, targetArena, scratch)
     }
 
-    private fun decompressRobust(
-        input: MemorySegment,
-        arena: Arena,
-    ): MemorySegment {
-        val inputBuffer = input.asByteBuffer()
-        val inputStream = ByteBufferInputStream(inputBuffer)
-        val outputStream = NativeByteArrayOutputStream(arena)
+    private fun sumMemberUncompressedSizes(
+        nativeInput: MemorySegment,
+        offsetsSegment: MemorySegment,
+        memberCount: Int,
+    ): Long {
+        val inputSize = nativeInput.byteSize()
+        var totalUncompressedSize = 0L
 
-        try {
-            GZIPInputStream(inputStream).use { gzipInputStream ->
-                val buffer = ByteArray(65536)
-                var bytesRead = gzipInputStream.read(buffer)
-
-                while (bytesRead != -1) {
-                    outputStream.writeByteArray(buffer, 0, bytesRead)
-                    bytesRead = gzipInputStream.read(buffer)
-                }
+        for (index in 0 until memberCount) {
+            val memberStart = offsetsSegment.get(ValueLayout.JAVA_LONG_UNALIGNED, index.toLong() * Long.SIZE_BYTES)
+            val memberEnd = when {
+                index + 1 < memberCount ->
+                    offsetsSegment.get(ValueLayout.JAVA_LONG_UNALIGNED, (index + 1).toLong() * Long.SIZE_BYTES)
+                else -> inputSize
             }
-        } catch (_: EOFException) {
+
+            if (memberStart < 0L || memberEnd > inputSize || memberEnd - memberStart < MIN_GZIP_MEMBER_BYTES) {
+                return -1L
+            }
+
+            val memberUncompressedSize = nativeInput.get(LITTLE_ENDIAN_INT, memberEnd - 4L).toLong() and 0xFFFFFFFFL
+            totalUncompressedSize += memberUncompressedSize
         }
 
-        return outputStream.toContiguousSegment(arena)
+        return totalUncompressedSize
+    }
+
+    private fun maxSpeculativeBytesFor(inputSize: Long): Long {
+        val theoreticalBound = when {
+            inputSize > Long.MAX_VALUE / MAX_DEFLATE_EXPANSION_RATIO -> Long.MAX_VALUE
+            else -> inputSize * MAX_DEFLATE_EXPANSION_RATIO
+        }
+
+        return minOf(MAX_SPECULATIVE_ALLOCATION_BYTES, theoreticalBound)
+    }
+
+    private fun copyToTargetOrReturnSlice(
+        scratchSlice: MemorySegment,
+        targetArena: Arena?,
+    ): MemorySegment {
+        if (targetArena == null) {
+            return scratchSlice
+        }
+
+        val byteCount = scratchSlice.byteSize()
+        val exactSegment = targetArena.allocateUninitialized(byteCount)
+        if (byteCount > 0L) {
+            MemorySegment.copy(scratchSlice, 0L, exactSegment, 0L, byteCount)
+        }
+
+        return exactSegment
+    }
+
+    private fun allocateTarget(
+        byteSize: Long,
+        targetArena: Arena?,
+        scratch: CompressionScratch,
+    ): MemorySegment {
+        if (targetArena != null) {
+            return targetArena.allocateUninitialized(byteSize)
+        }
+
+        return scratch.ensureOutputCapacity(byteSize).asSlice(0L, byteSize)
     }
 
 }

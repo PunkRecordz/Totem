@@ -2,6 +2,7 @@ package org.punkrecordz.totem
 
 import org.punkrecordz.totem.codec.CompoundProtocol
 import org.punkrecordz.totem.codec.ProtocolRegistry
+import org.punkrecordz.totem.io.FileChannelIo
 import org.punkrecordz.totem.io.MemoryLayouts
 import org.punkrecordz.totem.io.allocateUninitialized
 import org.punkrecordz.totem.io.compression.Compression
@@ -37,20 +38,20 @@ internal object TotemTagIo {
             )
 
             channel.use { activeChannel ->
-                val totalWritten = Arena.ofConfined().use { tempArena ->
-                    val outputStream = NativeByteArrayOutputStream(tempArena, activeChannel)
+                val totalWritten = Arena.ofConfined().use { temporaryArena ->
+                    val outputStream = NativeByteArrayOutputStream(temporaryArena, activeChannel)
                     buildDsl(outputStream, rootName, block)
                     outputStream.totalWritten
                 }
                 activeChannel.truncate(totalWritten)
             }
         } else {
-            Arena.ofConfined().use { tempArena ->
-                val outputStream = NativeByteArrayOutputStream(tempArena, null)
+            Arena.ofConfined().use { temporaryArena ->
+                val outputStream = NativeByteArrayOutputStream(temporaryArena, null)
                 buildDsl(outputStream, rootName, block)
 
-                val uncompressedSegment = outputStream.toContiguousSegment(tempArena)
-                val compressedSegment = compression.compress(uncompressedSegment, tempArena)
+                val uncompressedSegment = outputStream.toContiguousSegment(temporaryArena)
+                val compressedSegment = compression.compress(uncompressedSegment, temporaryArena)
                 writeSegmentToFile(path, compressedSegment)
             }
         }
@@ -113,8 +114,8 @@ internal object TotemTagIo {
             return uncompressedSegment
         }
 
-        return Arena.ofConfined().use { tempArena ->
-            val uncompressedSegment = tempArena.allocateUninitialized(totalSize)
+        return Arena.ofConfined().use { temporaryArena ->
+            val uncompressedSegment = temporaryArena.allocateUninitialized(totalSize)
             writeUncompressedTag(uncompressedSegment, tag)
             compression.compress(uncompressedSegment, arena)
         }
@@ -144,7 +145,14 @@ internal object TotemTagIo {
             StandardOpenOption.WRITE,
             StandardOpenOption.TRUNCATE_EXISTING,
         ).use { activeChannel ->
-            activeChannel.write(segment.asByteBuffer())
+            FileChannelIo.writeSegmentFullyAt(
+                fileChannel = activeChannel,
+                fileOffset = 0L,
+                sourceSegment = segment,
+                bufferOffset = 0L,
+                byteCount = segment.byteSize(),
+                description = "NBT file payload",
+            )
         }
     }
 

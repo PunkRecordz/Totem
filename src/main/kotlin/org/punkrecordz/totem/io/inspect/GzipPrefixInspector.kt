@@ -1,6 +1,7 @@
 package org.punkrecordz.totem.io.inspect
 
 import org.punkrecordz.totem.ffi.TotemSys
+import org.punkrecordz.totem.io.FileChannelIo
 import org.punkrecordz.totem.io.memory.OffHeapScratchBuffer
 import java.lang.foreign.MemorySegment
 import java.lang.foreign.ValueLayout
@@ -213,16 +214,6 @@ internal object GzipPrefixInspector {
         channel: FileChannel,
         fileOffset: Long,
         targetSlice: MemorySegment,
-    ): Long {
-        val byteBuffer = targetSlice.asByteBuffer()
-        while (byteBuffer.hasRemaining()) {
-            val bytesRead = channel.read(byteBuffer, fileOffset + byteBuffer.position().toLong())
-            if (bytesRead <= 0) {
-                break
-            }
-        }
-
-        return byteBuffer.position().toLong()
-    }
+    ): Long = FileChannelIo.readSegmentUpTo(channel, fileOffset, targetSlice, targetSlice.byteSize())
 
 }

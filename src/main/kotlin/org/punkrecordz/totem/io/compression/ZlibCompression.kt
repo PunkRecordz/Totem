@@ -1,18 +1,11 @@
 package org.punkrecordz.totem.io.compression
 
-import com.fulcrumgenomics.jlibdeflate.LibdeflateCompressor
-import com.fulcrumgenomics.jlibdeflate.LibdeflateDecompressor
-import org.punkrecordz.totem.io.ByteBufferInputStream
+import org.punkrecordz.totem.ffi.TotemCodecSys
 import org.punkrecordz.totem.io.allocateUninitialized
-import java.io.ByteArrayOutputStream
-import java.io.EOFException
 import java.lang.foreign.Arena
 import java.lang.foreign.MemorySegment
-import java.lang.foreign.ValueLayout
-import java.util.zip.InflaterInputStream
-
-private val zlibDecompressor = ThreadLocal.withInitial { LibdeflateDecompressor() }
-private val zlibCompressors = ThreadLocal.withInitial { HashMap<Int, LibdeflateCompressor>() }
+import java.lang.ref.Reference
+import java.util.zip.DataFormatException
 
 class ZlibCompression(val level: Int = 1) : Compression {
 
@@ -20,28 +13,46 @@ class ZlibCompression(val level: Int = 1) : Compression {
         input: MemorySegment,
         arena: Arena,
     ): MemorySegment {
+        val transientSlice = decompressTransient(input)
+        val decompressedBytes = transientSlice.byteSize()
+        val outputSegment = arena.allocateUninitialized(decompressedBytes)
+
+        if (decompressedBytes > 0L) {
+            MemorySegment.copy(transientSlice, 0L, outputSegment, 0L, decompressedBytes)
+        }
+
+        return outputSegment
+    }
+
+    override fun decompressTransient(input: MemorySegment): MemorySegment {
         val inputSize = input.byteSize()
-        var capacity = maxOf(65536L, inputSize * 4)
+        require(inputSize >= 2L) {
+            "Input ZLIB segment size ($inputSize bytes) is too short to contain a valid ZLIB header"
+        }
 
-        while (true) {
-            try {
-                val output = arena.allocateUninitialized(capacity)
-                val decompressor = zlibDecompressor.get()
+        val scratch = CompressionScratch.get()
+        val nativeInput = scratch.nativeSource(input)
 
-                val inputBuffer = input.asByteBuffer()
-                val outputBuffer = output.asByteBuffer()
-                val result = decompressor.zlibDecompressEx(inputBuffer, outputBuffer)
-                val decompressedSize = result.outputBytesProduced().toLong()
+        try {
+            while (true) {
+                val producedBytes = TotemCodecSys.inflate(
+                    TotemCodecSys.FORMAT_ZLIB,
+                    nativeInput,
+                    scratch.outputSegment,
+                )
 
-                return output.asSlice(0, decompressedSize)
-            } catch (_: Exception) {
-                // double capacity if the buffer is too small, fallback if size becomes unreasonably large
-                if (capacity >= 16 * 1024 * 1024L) {
-                    return decompressRobust(input, arena)
+                when {
+                    producedBytes >= 0L -> return scratch.outputSegment.asSlice(0L, producedBytes)
+                    producedBytes == TotemCodecSys.STATUS_INSUFFICIENT_SPACE && scratch.growOutputCapacity() -> continue
+                    producedBytes == TotemCodecSys.STATUS_INSUFFICIENT_SPACE -> return decompressStreaming(nativeInput, scratch)
+                    else -> throw IllegalArgumentException(
+                        "Malformed ZLIB stream of $inputSize bytes (native status $producedBytes)",
+                    )
                 }
-
-                capacity *= 2
             }
+        } finally {
+            Reference.reachabilityFence(input)
+            Reference.reachabilityFence(nativeInput)
         }
     }
 
@@ -49,54 +60,60 @@ class ZlibCompression(val level: Int = 1) : Compression {
         input: MemorySegment,
         arena: Arena,
     ): MemorySegment {
-        val compressor = zlibCompressors.get().getOrPut(level) {
-            LibdeflateCompressor(level)
+        val inputSize = input.byteSize()
+        require(inputSize <= Int.MAX_VALUE.toLong()) {
+            "ZLIB single-segment compression size ($inputSize bytes) exceeds Int.MAX_VALUE"
         }
 
-        val bound = compressor.zlibCompressBound(input.byteSize().toInt()).toLong()
-        val output = arena.allocateUninitialized(bound)
+        val scratch = CompressionScratch.get()
+        val nativeInput = scratch.nativeSource(input)
+        val compressBound = TotemCodecSys.deflateBound(TotemCodecSys.FORMAT_ZLIB, inputSize)
+        val destinationSegment = scratch.ensureOutputCapacity(compressBound).asSlice(0L, compressBound)
 
-        val inputBuffer = input.asByteBuffer()
-        val outputBuffer = output.asByteBuffer()
-        val compressedSize = compressor.zlibCompress(inputBuffer, outputBuffer)
+        val producedBytes = try {
+            TotemCodecSys.deflate(TotemCodecSys.FORMAT_ZLIB, level, nativeInput, destinationSegment)
+        } finally {
+            Reference.reachabilityFence(input)
+            Reference.reachabilityFence(nativeInput)
+        }
 
-        return output.asSlice(0, compressedSize.toLong())
+        if (producedBytes <= 0L) {
+            throw IllegalStateException(
+                "Failed to ZLIB-compress segment of $inputSize bytes with bound $compressBound (native status $producedBytes)",
+            )
+        }
+
+        val outputSegment = arena.allocateUninitialized(producedBytes)
+        MemorySegment.copy(destinationSegment, 0L, outputSegment, 0L, producedBytes)
+
+        return outputSegment
     }
 
-    private fun decompressRobust(
-        input: MemorySegment,
-        arena: Arena,
+    private fun decompressStreaming(
+        nativeInput: MemorySegment,
+        scratch: CompressionScratch,
     ): MemorySegment {
-        val inputBuffer = input.asByteBuffer()
-        val inputStream = ByteBufferInputStream(inputBuffer)
+        val inflater = scratch.zlibInflater
+        inflater.reset()
 
-        ByteArrayOutputStream().use { outputStream ->
-            try {
-                InflaterInputStream(inputStream).use { inflaterInputStream ->
-                    val buffer = ByteArray(65536)
-                    var bytesRead = inflaterInputStream.read(buffer)
-
-                    while (bytesRead != -1) {
-                        outputStream.write(buffer, 0, bytesRead)
-                        bytesRead = inflaterInputStream.read(buffer)
-                    }
-                }
-            } catch (_: EOFException) {
-            }
-
-            val decompressedBytes = outputStream.toByteArray()
-            val outputSegment = arena.allocateUninitialized(decompressedBytes.size.toLong())
-
-            MemorySegment.copy(
-                decompressedBytes,
-                0,
-                outputSegment,
-                ValueLayout.JAVA_BYTE,
-                0,
-                decompressedBytes.size,
+        return try {
+            val state = DeflateStreamInflater.inflateStream(
+                input = nativeInput,
+                startOffset = 0L,
+                endOffset = nativeInput.byteSize(),
+                inflater = inflater,
+                scratch = scratch,
+                initialSegment = scratch.outputSegment,
+                initialProducedBytes = 0L,
+                crc32 = null,
+                formatName = "ZLIB",
             )
 
-            return outputSegment
+            state.segment.asSlice(0L, state.totalProducedBytes)
+        } catch (exception: DataFormatException) {
+            throw IllegalArgumentException("Malformed ZLIB stream: ${exception.message}", exception)
+        } finally {
+            inflater.reset()
         }
     }
 
