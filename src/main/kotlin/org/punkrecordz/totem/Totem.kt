@@ -25,7 +25,7 @@ object Totem {
         path: Path,
         arena: Arena,
         compression: Compression? = null,
-    ): Pair<String, CompoundTag> = load(TotemTagIo.mapFileReadOnly(path, arena), arena, compression)
+    ): Pair<String, CompoundTag> = TotemTagIo.loadRootFromFile(path, arena, compression)
 
     fun load(
         bytes: ByteArray,
@@ -162,7 +162,7 @@ object Totem {
         path: Path,
         arena: Arena,
         compression: Compression? = null,
-    ): T = loadTag(TotemTagIo.mapFileReadOnly(path, arena), arena, compression)
+    ): T = TotemTagIo.loadTagFromFile(path, arena, compression)
 
     fun <T : Tag> loadTag(
         bytes: ByteArray,

@@ -22,6 +22,31 @@ import java.nio.file.StandardOpenOption
 
 internal object TotemTagIo {
 
+    fun loadRootFromFile(
+        path: Path,
+        arena: Arena,
+        compression: Compression?,
+    ): Pair<String, CompoundTag> = Arena.ofConfined().use { mapArena ->
+        val mappedSegment = mapFileReadOnly(path, mapArena)
+        val nbtSegment = decompressMappedSegment(mappedSegment, mapArena, arena, compression)
+
+        Totem.parseRootCompound(nbtSegment)
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    fun <T : Tag> loadTagFromFile(
+        path: Path,
+        arena: Arena,
+        compression: Compression?,
+    ): T = Arena.ofConfined().use { mapArena ->
+        val mappedSegment = mapFileReadOnly(path, mapArena)
+        val nbtSegment = decompressMappedSegment(mappedSegment, mapArena, arena, compression)
+        val rootTypeId = nbtSegment.get(MemoryLayouts.BYTE, 0L).toInt()
+        val protocol = ProtocolRegistry.getOrThrow(rootTypeId)
+
+        protocol.read(nbtSegment, MemoryLayouts.BYTE.byteSize()) as T
+    }
+
     fun writeDsl(
         path: Path,
         rootName: String?,
@@ -154,6 +179,27 @@ internal object TotemTagIo {
                 description = "NBT file payload",
             )
         }
+    }
+
+    private fun decompressMappedSegment(
+        mappedSegment: MemorySegment,
+        mapArena: Arena,
+        targetArena: Arena,
+        compression: Compression?,
+    ): MemorySegment {
+        val activeCompression = compression ?: Totem.detectCompression(mappedSegment)
+        val decompressedSegment = activeCompression.decompress(mappedSegment, targetArena)
+        if (decompressedSegment.scope() != mapArena.scope()) {
+            return decompressedSegment
+        }
+
+        val byteSize = decompressedSegment.byteSize()
+        val ownedSegment = targetArena.allocateUninitialized(byteSize)
+        if (byteSize > 0L) {
+            MemorySegment.copy(decompressedSegment, 0L, ownedSegment, 0L, byteSize)
+        }
+
+        return ownedSegment
     }
 
     private fun writeUncompressedTag(
