@@ -1,88 +1,37 @@
 package org.punkrecordz.totem.ffi
 
 import java.lang.foreign.FunctionDescriptor
-import java.lang.foreign.Linker
 import java.lang.foreign.MemorySegment
 import java.lang.foreign.ValueLayout
 import java.lang.invoke.MethodHandle
 
 object TotemBitPackSys {
 
-    private val nativeLinker: Linker = Linker.nativeLinker()
-    private val criticalHeapOption: Linker.Option = Linker.Option.critical(true)
-
-    private fun bindCriticalHeap(
-        symbolName: String,
-        descriptor: FunctionDescriptor,
-    ): MethodHandle {
-        val symbol = NativeLibraryLoader.symbolLookup.find(symbolName)
-            .orElseThrow { UnsatisfiedLinkError("Symbol $symbolName not found in totem-sys native library") }
-
-        return nativeLinker.downcallHandle(symbol, descriptor, criticalHeapOption)
-    }
+    private val bitPackDescriptor: FunctionDescriptor = FunctionDescriptor.of(
+        ValueLayout.JAVA_LONG,
+        ValueLayout.ADDRESS,
+        ValueLayout.JAVA_LONG,
+        ValueLayout.ADDRESS,
+        ValueLayout.JAVA_LONG,
+        ValueLayout.JAVA_INT,
+        ValueLayout.JAVA_BOOLEAN,
+        ValueLayout.JAVA_BOOLEAN,
+    )
 
     private val unpackLongsToShortsHandle: MethodHandle by lazy {
-        bindCriticalHeap(
-            "unpack_longs_to_shorts",
-            FunctionDescriptor.of(
-                ValueLayout.JAVA_LONG,
-                ValueLayout.ADDRESS,
-                ValueLayout.JAVA_LONG,
-                ValueLayout.ADDRESS,
-                ValueLayout.JAVA_LONG,
-                ValueLayout.JAVA_INT,
-                ValueLayout.JAVA_BOOLEAN,
-                ValueLayout.JAVA_BOOLEAN,
-            ),
-        )
+        NativeDowncalls.bindCriticalHeap("unpack_longs_to_shorts", bitPackDescriptor)
     }
 
     private val packShortsToLongsHandle: MethodHandle by lazy {
-        bindCriticalHeap(
-            "pack_shorts_to_longs",
-            FunctionDescriptor.of(
-                ValueLayout.JAVA_LONG,
-                ValueLayout.ADDRESS,
-                ValueLayout.JAVA_LONG,
-                ValueLayout.ADDRESS,
-                ValueLayout.JAVA_LONG,
-                ValueLayout.JAVA_INT,
-                ValueLayout.JAVA_BOOLEAN,
-                ValueLayout.JAVA_BOOLEAN,
-            ),
-        )
+        NativeDowncalls.bindCriticalHeap("pack_shorts_to_longs", bitPackDescriptor)
     }
 
     private val unpackLongsToLongsHandle: MethodHandle by lazy {
-        bindCriticalHeap(
-            "unpack_longs_to_longs",
-            FunctionDescriptor.of(
-                ValueLayout.JAVA_LONG,
-                ValueLayout.ADDRESS,
-                ValueLayout.JAVA_LONG,
-                ValueLayout.ADDRESS,
-                ValueLayout.JAVA_LONG,
-                ValueLayout.JAVA_INT,
-                ValueLayout.JAVA_BOOLEAN,
-                ValueLayout.JAVA_BOOLEAN,
-            ),
-        )
+        NativeDowncalls.bindCriticalHeap("unpack_longs_to_longs", bitPackDescriptor)
     }
 
     private val packLongsToLongsHandle: MethodHandle by lazy {
-        bindCriticalHeap(
-            "pack_longs_to_longs",
-            FunctionDescriptor.of(
-                ValueLayout.JAVA_LONG,
-                ValueLayout.ADDRESS,
-                ValueLayout.JAVA_LONG,
-                ValueLayout.ADDRESS,
-                ValueLayout.JAVA_LONG,
-                ValueLayout.JAVA_INT,
-                ValueLayout.JAVA_BOOLEAN,
-                ValueLayout.JAVA_BOOLEAN,
-            ),
-        )
+        NativeDowncalls.bindCriticalHeap("pack_longs_to_longs", bitPackDescriptor)
     }
 
     fun unpackLongsToShorts(

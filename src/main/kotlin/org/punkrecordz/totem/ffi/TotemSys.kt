@@ -20,8 +20,8 @@ object TotemSys {
     fun scanGzipMemberOffsets(
         compressedData: MemorySegment,
         maxMembers: Int = 2048,
-    ): LongArray = Arena.ofConfined().use { tempArena ->
-        val offsetsBuffer = tempArena.allocate(ValueLayout.JAVA_LONG, maxMembers.toLong())
+    ): LongArray = Arena.ofConfined().use { temporaryArena ->
+        val offsetsBuffer = temporaryArena.allocate(ValueLayout.JAVA_LONG, maxMembers.toLong())
         val memberCount = scanGzipMembers(compressedData, offsetsBuffer, maxMembers)
 
         if (memberCount <= 0) {
@@ -38,28 +38,14 @@ object TotemSys {
         destinationSlice: MemorySegment,
         expectedSize: Int,
     ): Long {
-        val result = TotemSysBindings.decodeVarIntShorts.invokeExact(
+        val status = TotemSysBindings.decodeVarIntShorts.invokeExact(
             sourceSlice,
             sourceSlice.byteSize(),
             destinationSlice,
             expectedSize,
         ) as Long
 
-        if (result < 0L) {
-            when (result) {
-                -1L -> throw IllegalArgumentException(
-                    "Malformed VarInt data: byte buffer was truncated in the middle of a VarInt sequence.",
-                )
-                -2L -> throw IllegalArgumentException(
-                    "Incomplete VarInt data: expected $expectedSize elements, but buffer contained fewer VarInt values.",
-                )
-                else -> throw IllegalArgumentException(
-                    "Failed to decode VarInt data: native decoder returned error code $result.",
-                )
-            }
-        }
-
-        return result
+        return VarIntDecodeStatus.verify(status, expectedSize)
     }
 
     fun encodeShortsVarInt(
@@ -165,21 +151,21 @@ object TotemSys {
         keyLength: Short,
     ): Long {
         val slice = if (offset == 0L) segment else segment.asSlice(offset)
-        val result = TotemSysBindings.findCompoundEntry.invokeExact(
+        val entryOffset = TotemSysBindings.findCompoundEntry.invokeExact(
             slice,
             slice.byteSize(),
             keySegment,
             keyLength,
         ) as Long
 
-        if (result < -1L) {
-            when (result) {
+        if (entryOffset < -1L) {
+            when (entryOffset) {
                 -3L -> throw IllegalArgumentException("NBT nesting depth exceeds maximum limit of 512 at offset $offset")
                 else -> throw IllegalArgumentException("Malformed NBT compound entry encountered at offset $offset")
             }
         }
 
-        return result
+        return entryOffset
     }
 
     fun findVarIntBoundaries(

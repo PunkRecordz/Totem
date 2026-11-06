@@ -1,27 +1,13 @@
 package org.punkrecordz.totem.ffi
 
 import java.lang.foreign.FunctionDescriptor
-import java.lang.foreign.Linker
 import java.lang.foreign.ValueLayout
 import java.lang.invoke.MethodHandle
 
 internal object TotemSysBindings {
 
-    private val nativeLinker: Linker = Linker.nativeLinker()
-    private val criticalOption: Linker.Option = Linker.Option.critical(false)
-
-    private fun bindCritical(
-        symbolName: String,
-        descriptor: FunctionDescriptor,
-    ): MethodHandle {
-        val symbol = NativeLibraryLoader.symbolLookup.find(symbolName)
-            .orElseThrow { UnsatisfiedLinkError("Symbol $symbolName not found in totem-sys native library") }
-
-        return nativeLinker.downcallHandle(symbol, descriptor, criticalOption)
-    }
-
     val decodeVarIntShorts: MethodHandle by lazy {
-        bindCritical(
+        NativeDowncalls.bindCritical(
             "decode_varint_shorts",
             FunctionDescriptor.of(
                 ValueLayout.JAVA_LONG,
@@ -34,7 +20,7 @@ internal object TotemSysBindings {
     }
 
     val encodeShortsVarInt: MethodHandle by lazy {
-        bindCritical(
+        NativeDowncalls.bindCritical(
             "encode_shorts_varint",
             FunctionDescriptor.of(
                 ValueLayout.JAVA_LONG,
@@ -47,7 +33,7 @@ internal object TotemSysBindings {
     }
 
     val varIntEncodedSize: MethodHandle by lazy {
-        bindCritical(
+        NativeDowncalls.bindCritical(
             "varint_encoded_size",
             FunctionDescriptor.of(
                 ValueLayout.JAVA_LONG,
@@ -58,7 +44,7 @@ internal object TotemSysBindings {
     }
 
     val countVarIntTerminals: MethodHandle by lazy {
-        bindCritical(
+        NativeDowncalls.bindCritical(
             "count_varint_terminals",
             FunctionDescriptor.of(
                 ValueLayout.JAVA_LONG,
@@ -69,7 +55,7 @@ internal object TotemSysBindings {
     }
 
     val replaceShorts: MethodHandle by lazy {
-        bindCritical(
+        NativeDowncalls.bindCritical(
             "replace_shorts",
             FunctionDescriptor.ofVoid(
                 ValueLayout.ADDRESS,
@@ -81,7 +67,7 @@ internal object TotemSysBindings {
     }
 
     val fillShorts: MethodHandle by lazy {
-        bindCritical(
+        NativeDowncalls.bindCritical(
             "fill_shorts",
             FunctionDescriptor.ofVoid(
                 ValueLayout.ADDRESS,
@@ -92,7 +78,7 @@ internal object TotemSysBindings {
     }
 
     val translateShortsLut: MethodHandle by lazy {
-        bindCritical(
+        NativeDowncalls.bindCritical(
             "translate_shorts_lut",
             FunctionDescriptor.ofVoid(
                 ValueLayout.ADDRESS,
@@ -103,7 +89,7 @@ internal object TotemSysBindings {
     }
 
     val scanGzipMembers: MethodHandle by lazy {
-        bindCritical(
+        NativeDowncalls.bindCritical(
             "scan_gzip_members",
             FunctionDescriptor.of(
                 ValueLayout.JAVA_INT,
@@ -116,7 +102,7 @@ internal object TotemSysBindings {
     }
 
     val countMatchingShorts: MethodHandle by lazy {
-        bindCritical(
+        NativeDowncalls.bindCritical(
             "count_matching_shorts",
             FunctionDescriptor.of(
                 ValueLayout.JAVA_LONG,
@@ -128,7 +114,7 @@ internal object TotemSysBindings {
     }
 
     val scanMatchingShorts: MethodHandle by lazy {
-        bindCritical(
+        NativeDowncalls.bindCritical(
             "scan_matching_shorts",
             FunctionDescriptor.of(
                 ValueLayout.JAVA_LONG,
@@ -143,7 +129,7 @@ internal object TotemSysBindings {
     }
 
     val calculateCompoundSize: MethodHandle by lazy {
-        bindCritical(
+        NativeDowncalls.bindCritical(
             "calculate_compound_size",
             FunctionDescriptor.of(
                 ValueLayout.JAVA_LONG,
@@ -154,7 +140,7 @@ internal object TotemSysBindings {
     }
 
     val findCompoundEntry: MethodHandle by lazy {
-        bindCritical(
+        NativeDowncalls.bindCritical(
             "find_compound_entry",
             FunctionDescriptor.of(
                 ValueLayout.JAVA_LONG,
@@ -167,7 +153,7 @@ internal object TotemSysBindings {
     }
 
     val findVarIntBoundaries: MethodHandle by lazy {
-        bindCritical(
+        NativeDowncalls.bindCritical(
             "find_varint_boundaries",
             FunctionDescriptor.ofVoid(
                 ValueLayout.ADDRESS,
@@ -179,7 +165,7 @@ internal object TotemSysBindings {
     }
 
     val calculateListSize: MethodHandle by lazy {
-        bindCritical(
+        NativeDowncalls.bindCritical(
             "calculate_list_size",
             FunctionDescriptor.of(
                 ValueLayout.JAVA_LONG,
