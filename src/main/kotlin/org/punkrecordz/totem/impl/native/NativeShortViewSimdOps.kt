@@ -2,6 +2,7 @@ package org.punkrecordz.totem.impl.native
 
 import org.punkrecordz.totem.concurrent.TotemThreadPool
 import org.punkrecordz.totem.concurrent.awaitResult
+import org.punkrecordz.totem.ffi.TotemParallelSys
 import org.punkrecordz.totem.ffi.TotemSys
 import org.punkrecordz.totem.io.allocateUninitialized
 import java.lang.foreign.Arena
@@ -14,37 +15,31 @@ internal const val SHORT_VIEW_PARALLEL_THRESHOLD: Long = 65536L
 
 internal object NativeShortViewSimdOps {
 
-    inline fun executeParallel(
-        elementCount: Long,
+    fun replaceAll(
         payloadSlice: MemorySegment,
-        crossinline action: (workerSlice: MemorySegment, count: Long) -> Unit,
+        elementCount: Long,
+        target: Short,
+        replacement: Short,
     ) {
         if (elementCount < SHORT_VIEW_PARALLEL_THRESHOLD) {
-            action(payloadSlice, elementCount)
+            TotemSys.replaceShorts(payloadSlice, elementCount, target, replacement)
             return
         }
 
-        val availableProcessors = Runtime.getRuntime().availableProcessors().coerceIn(1, 16)
-        val chunkSize = (elementCount + availableProcessors - 1) / availableProcessors
-        val partitionCount = ((elementCount + chunkSize - 1) / chunkSize).toInt()
-        val rawBaseAddress = payloadSlice.address()
+        TotemParallelSys.replaceShortsParallel(payloadSlice, elementCount, target, replacement)
+    }
 
-        val tasks = (0 until partitionCount).map { partitionIndex ->
-            val startOffset = partitionIndex.toLong() * chunkSize
-            val count = minOf(chunkSize, elementCount - startOffset)
-
-            Callable {
-                val workerSlice = MemorySegment.ofAddress(rawBaseAddress + (startOffset shl 1))
-                    .reinterpret(count shl 1)
-
-                action(workerSlice, count)
-            }
+    fun fill(
+        payloadSlice: MemorySegment,
+        elementCount: Long,
+        value: Short,
+    ) {
+        if (elementCount < SHORT_VIEW_PARALLEL_THRESHOLD) {
+            TotemSys.fillShorts(payloadSlice, elementCount, value)
+            return
         }
 
-        val futures = TotemThreadPool.executor.invokeAll(tasks)
-        for (future in futures) {
-            future.awaitResult()
-        }
+        TotemParallelSys.fillShortsParallel(payloadSlice, elementCount, value)
     }
 
     fun translate(
@@ -52,32 +47,34 @@ internal object NativeShortViewSimdOps {
         elementCount: Long,
         lookupTable: ShortArray,
     ) {
-        if (elementCount == 0L || lookupTable.isEmpty()) return
-
-        Arena.ofConfined().use { tempArena ->
-            val lookupTableSegment = tempArena.allocate(65536L * Short.SIZE_BYTES)
-            val copyCount = minOf(65536, lookupTable.size)
-            MemorySegment.copy(
-                MemorySegment.ofArray(lookupTable),
-                0L,
-                lookupTableSegment,
-                0L,
-                copyCount.toLong() * Short.SIZE_BYTES,
-            )
-
-            val rawLookupTableAddress = lookupTableSegment.address()
-
-            executeParallel(elementCount, payloadSlice) { workerSlice, count ->
-                val workerLookupTableSlice = MemorySegment.ofAddress(rawLookupTableAddress)
-                    .reinterpret(65536L * Short.SIZE_BYTES)
-
-                TotemSys.translateShorts(
-                    workerSlice,
-                    count,
-                    workerLookupTableSlice,
-                )
-            }
+        if (elementCount == 0L || lookupTable.isEmpty()) {
+            return
         }
+
+        val scratch = LookupTableScratch.get()
+        val copyCount = minOf(LOOKUP_TABLE_ENTRIES, lookupTable.size)
+        val copiedBytes = copyCount.toLong() * Short.SIZE_BYTES
+
+        MemorySegment.copy(
+            MemorySegment.ofArray(lookupTable),
+            0L,
+            scratch.segment,
+            0L,
+            copiedBytes,
+        )
+
+        if (copyCount < scratch.dirtyEntries) {
+            val staleBytes = (scratch.dirtyEntries - copyCount).toLong() * Short.SIZE_BYTES
+            scratch.segment.asSlice(copiedBytes, staleBytes).fill(0)
+        }
+        scratch.dirtyEntries = copyCount
+
+        if (elementCount < SHORT_VIEW_PARALLEL_THRESHOLD) {
+            TotemSys.translateShorts(payloadSlice, elementCount, scratch.segment)
+            return
+        }
+
+        TotemParallelSys.translateShortsParallel(payloadSlice, elementCount, scratch.segment)
     }
 
     fun scanMatchingIndices(
@@ -85,11 +82,13 @@ internal object NativeShortViewSimdOps {
         elementCount: Long,
         shouldIgnore: BooleanArray,
     ): IntArray {
-        if (elementCount == 0L || shouldIgnore.isEmpty()) return IntArray(0)
+        if (elementCount == 0L || shouldIgnore.isEmpty()) {
+            return IntArray(0)
+        }
 
-        return Arena.ofConfined().use { tempArena ->
-            val lookupTableSegment = tempArena.allocate(65536L)
-            val lookupTableBytes = ByteArray(65536) { index ->
+        return Arena.ofConfined().use { temporaryArena ->
+            val lookupTableSegment = temporaryArena.allocate(LOOKUP_TABLE_ENTRIES.toLong())
+            val lookupTableBytes = ByteArray(LOOKUP_TABLE_ENTRIES) { index ->
                 if (index < shouldIgnore.size && shouldIgnore[index]) 1.toByte() else 0.toByte()
             }
 
@@ -98,28 +97,29 @@ internal object NativeShortViewSimdOps {
                 0L,
                 lookupTableSegment,
                 0L,
-                65536L,
+                LOOKUP_TABLE_ENTRIES.toLong(),
             )
 
             if (elementCount < SHORT_VIEW_PARALLEL_THRESHOLD) {
                 val matchCount = TotemSys.countMatchingShorts(payloadSlice, elementCount, lookupTableSegment)
-                if (matchCount == 0L) return@use IntArray(0)
+                if (matchCount == 0L) {
+                    return@use IntArray(0)
+                }
 
-                val resultSegment = tempArena.allocateUninitialized(matchCount * 4L)
-
+                val matchesSegment = temporaryArena.allocateUninitialized(matchCount * Int.SIZE_BYTES)
                 TotemSys.scanMatchingShorts(
                     payloadSlice,
                     elementCount,
                     0L,
                     lookupTableSegment,
-                    resultSegment,
+                    matchesSegment,
                     matchCount,
                 )
 
-                val result = IntArray(matchCount.toInt())
-                MemorySegment.copy(resultSegment, ValueLayout.JAVA_INT, 0L, result, 0, matchCount.toInt())
+                val matchedIndices = IntArray(matchCount.toInt())
+                MemorySegment.copy(matchesSegment, ValueLayout.JAVA_INT, 0L, matchedIndices, 0, matchCount.toInt())
 
-                return@use result
+                return@use matchedIndices
             }
 
             val availableProcessors = Runtime.getRuntime().availableProcessors().coerceIn(1, 16)
@@ -135,14 +135,10 @@ internal object NativeShortViewSimdOps {
                 Callable {
                     val workerSlice = MemorySegment.ofAddress(rawBaseAddress + (startOffset shl 1))
                         .reinterpret(count shl 1)
-                    val workerLookupTableSlice = MemorySegment.ofAddress(rawLookupTableAddress)
-                        .reinterpret(65536L)
+                    val workerLookupSlice = MemorySegment.ofAddress(rawLookupTableAddress)
+                        .reinterpret(LOOKUP_TABLE_ENTRIES.toLong())
 
-                    TotemSys.countMatchingShorts(
-                        workerSlice,
-                        count,
-                        workerLookupTableSlice,
-                    )
+                    TotemSys.countMatchingShorts(workerSlice, count, workerLookupSlice)
                 }
             }
 
@@ -155,12 +151,13 @@ internal object NativeShortViewSimdOps {
             }
 
             if (totalMatches > Int.MAX_VALUE) {
-                throw IllegalStateException("Matching elements count ($totalMatches) exceeds maximum array capacity of ${Int.MAX_VALUE}")
+                throw IllegalStateException(
+                    "Matching elements count ($totalMatches) exceeds maximum array capacity of ${Int.MAX_VALUE}",
+                )
             }
 
-            val resultSegment = tempArena.allocateUninitialized(totalMatches * 4L)
-            val rawResultAddress = resultSegment.address()
-
+            val matchesSegment = temporaryArena.allocateUninitialized(totalMatches * Int.SIZE_BYTES)
+            val rawMatchesAddress = matchesSegment.address()
             val partitionDestinationOffsets = LongArray(partitionCount)
             var currentOffset = 0L
 
@@ -179,16 +176,16 @@ internal object NativeShortViewSimdOps {
                     if (matchesInPartition > 0L) {
                         val workerSlice = MemorySegment.ofAddress(rawBaseAddress + (startOffset shl 1))
                             .reinterpret(count shl 1)
-                        val workerLookupTableSlice = MemorySegment.ofAddress(rawLookupTableAddress)
-                            .reinterpret(65536L)
-                        val workerDestinationSlice = MemorySegment.ofAddress(rawResultAddress + (destinationOffset shl 2))
+                        val workerLookupSlice = MemorySegment.ofAddress(rawLookupTableAddress)
+                            .reinterpret(LOOKUP_TABLE_ENTRIES.toLong())
+                        val workerDestinationSlice = MemorySegment.ofAddress(rawMatchesAddress + (destinationOffset shl 2))
                             .reinterpret(matchesInPartition shl 2)
 
                         TotemSys.scanMatchingShorts(
                             workerSlice,
                             count,
                             startOffset,
-                            workerLookupTableSlice,
+                            workerLookupSlice,
                             workerDestinationSlice,
                             matchesInPartition,
                         )
@@ -201,10 +198,10 @@ internal object NativeShortViewSimdOps {
                 future.awaitResult()
             }
 
-            val result = IntArray(totalMatches.toInt())
-            MemorySegment.copy(resultSegment, ValueLayout.JAVA_INT, 0L, result, 0, totalMatches.toInt())
+            val matchedIndices = IntArray(totalMatches.toInt())
+            MemorySegment.copy(matchesSegment, ValueLayout.JAVA_INT, 0L, matchedIndices, 0, totalMatches.toInt())
 
-            result
+            matchedIndices
         }
     }
 

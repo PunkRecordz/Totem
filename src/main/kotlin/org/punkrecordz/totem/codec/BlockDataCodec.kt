@@ -124,35 +124,34 @@ object BlockDataCodec {
         bitsPerEntry: Int,
         count: Int,
         precise: Boolean = false,
-    ): LongArray {
-        if (longs is HeapLongArrayTag) {
-            return unpack(longs.array, bitsPerEntry, count, precise)
-        }
-
-        if (longs is NativeLongArrayTag) {
+    ): LongArray = when (longs) {
+        is HeapLongArrayTag -> unpack(longs.array, bitsPerEntry, count, precise)
+        is NativeLongArrayTag -> {
             require(count >= 0) { "count must be non-negative, but was $count" }
             require(bitsPerEntry in 1..64) { "bitsPerEntry must be in 1..64, but was $bitsPerEntry" }
 
             val longsCount = longs.size
             val unpackedSize = if (precise) count else minOf(longsCount * (64 / bitsPerEntry), count)
-            if (unpackedSize <= 0) return LongArray(0)
-
-            val unpacked = LongArray(unpackedSize)
-            TotemBitPackSys.unpackLongsToLongs(
-                longs.segment.asSlice(MemoryLayouts.INT.byteSize()),
-                longsCount.toLong(),
-                MemorySegment.ofArray(unpacked),
-                unpackedSize.toLong(),
-                bitsPerEntry,
-                precise,
-                bigEndianSource = true,
-            )
-
-            return unpacked
+            if (unpackedSize <= 0) {
+                LongArray(0)
+            } else {
+                val unpacked = LongArray(unpackedSize)
+                TotemBitPackSys.unpackLongsToLongs(
+                    longs.segment.asSlice(MemoryLayouts.INT.byteSize()),
+                    longsCount.toLong(),
+                    MemorySegment.ofArray(unpacked),
+                    unpackedSize.toLong(),
+                    bitsPerEntry,
+                    precise,
+                    bigEndianSource = true,
+                )
+                unpacked
+            }
         }
-
-        val fallbackArray = LongArray(longs.size) { index -> longs[index] }
-        return unpack(fallbackArray, bitsPerEntry, count, precise)
+        else -> {
+            val fallbackArray = LongArray(longs.size) { index -> longs[index] }
+            unpack(fallbackArray, bitsPerEntry, count, precise)
+        }
     }
 
     fun packShorts(
@@ -161,6 +160,10 @@ object BlockDataCodec {
         precise: Boolean = false,
     ): LongArray {
         require(bitsPerEntry in 1..16) { "bitsPerEntry for ShortArray must be in 1..16, but was $bitsPerEntry" }
+
+        SectionShortBitPacker.tryPackSectionShorts(entries, bitsPerEntry, precise)?.let { fastPacked ->
+            return fastPacked
+        }
 
         val longsCount = calculatePackedLongCount(entries.size, bitsPerEntry, precise)
         if (longsCount == 0) return LongArray(0)
@@ -210,35 +213,34 @@ object BlockDataCodec {
         bitsPerEntry: Int,
         count: Int,
         precise: Boolean = false,
-    ): ShortArray {
-        if (longs is HeapLongArrayTag) {
-            return unpackShorts(longs.array, bitsPerEntry, count, precise)
-        }
-
-        if (longs is NativeLongArrayTag) {
+    ): ShortArray = when (longs) {
+        is HeapLongArrayTag -> unpackShorts(longs.array, bitsPerEntry, count, precise)
+        is NativeLongArrayTag -> {
             require(count >= 0) { "count must be non-negative, but was $count" }
             require(bitsPerEntry in 1..16) { "bitsPerEntry for ShortArray must be in 1..16, but was $bitsPerEntry" }
 
             val longsCount = longs.size
             val unpackedSize = if (precise) count else minOf(longsCount * (64 / bitsPerEntry), count)
-            if (unpackedSize <= 0) return ShortArray(0)
-
-            val unpacked = ShortArray(unpackedSize)
-            TotemBitPackSys.unpackLongsToShorts(
-                longs.segment.asSlice(MemoryLayouts.INT.byteSize()),
-                longsCount.toLong(),
-                MemorySegment.ofArray(unpacked),
-                unpackedSize.toLong(),
-                bitsPerEntry,
-                precise,
-                bigEndianSource = true,
-            )
-
-            return unpacked
+            if (unpackedSize <= 0) {
+                ShortArray(0)
+            } else {
+                val unpacked = ShortArray(unpackedSize)
+                TotemBitPackSys.unpackLongsToShorts(
+                    longs.segment.asSlice(MemoryLayouts.INT.byteSize()),
+                    longsCount.toLong(),
+                    MemorySegment.ofArray(unpacked),
+                    unpackedSize.toLong(),
+                    bitsPerEntry,
+                    precise,
+                    bigEndianSource = true,
+                )
+                unpacked
+            }
         }
-
-        val fallbackArray = LongArray(longs.size) { index -> longs[index] }
-        return unpackShorts(fallbackArray, bitsPerEntry, count, precise)
+        else -> {
+            val fallbackArray = LongArray(longs.size) { index -> longs[index] }
+            unpackShorts(fallbackArray, bitsPerEntry, count, precise)
+        }
     }
 
 }

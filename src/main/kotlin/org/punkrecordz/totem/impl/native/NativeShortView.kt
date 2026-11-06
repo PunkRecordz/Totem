@@ -1,6 +1,5 @@
 package org.punkrecordz.totem.impl.native
 
-import org.punkrecordz.totem.ffi.TotemSys
 import org.punkrecordz.totem.io.MemoryLayouts
 import org.punkrecordz.totem.io.allocateUninitialized
 import org.punkrecordz.totem.view.NativeView
@@ -44,31 +43,23 @@ value class NativeShortView(
         val elementCount = size.toLong()
         if (elementCount == 0L) return
 
-        val payloadSlice = segment.asSlice(SHORT_VIEW_HEADER_OFFSET)
-
-        NativeShortViewSimdOps.executeParallel(elementCount, payloadSlice) { workerSlice, count ->
-            TotemSys.replaceShorts(
-                workerSlice,
-                count,
-                target,
-                replacement,
-            )
-        }
+        NativeShortViewSimdOps.replaceAll(
+            payloadSlice = segment.asSlice(SHORT_VIEW_HEADER_OFFSET),
+            elementCount = elementCount,
+            target = target,
+            replacement = replacement,
+        )
     }
 
     override fun fill(value: Short) {
         val elementCount = size.toLong()
         if (elementCount == 0L) return
 
-        val payloadSlice = segment.asSlice(SHORT_VIEW_HEADER_OFFSET)
-
-        NativeShortViewSimdOps.executeParallel(elementCount, payloadSlice) { workerSlice, count ->
-            TotemSys.fillShorts(
-                workerSlice,
-                count,
-                value,
-            )
-        }
+        NativeShortViewSimdOps.fill(
+            payloadSlice = segment.asSlice(SHORT_VIEW_HEADER_OFFSET),
+            elementCount = elementCount,
+            value = value,
+        )
     }
 
     override fun translate(lookupTable: ShortArray) {
