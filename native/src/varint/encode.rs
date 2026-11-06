@@ -2,7 +2,6 @@ use super::encode_swar::{
     encode_parallel_4, encode_parallel_4_two_bytes, encode_single, encode_single_branchless,
 };
 
-/// AVX2 encoder processing up to 64 elements at once, with branchless 16-wide encoding for mixed 1/2-byte streams.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 fn encode_shorts_varint_avx2(
@@ -22,12 +21,12 @@ fn encode_shorts_varint_avx2(
     let mask_007f = _mm256_set1_epi16(0x007F);
     let mask_0080 = _mm256_set1_epi16(0x0080u16 as i16);
 
-    let src_len = source.len();
+    let source_length = source.len();
 
-    while source_offset + 32 <= src_len {
+    while source_offset + 32 <= source_length {
         while let Some(in_64) = source
             .get(source_offset..source_offset + 64)
-            .and_then(|s| s.first_chunk::<64>())
+            .and_then(|slice| slice.first_chunk::<64>())
         {
             let (s0, r1) = in_64.split_first_chunk::<16>().unwrap();
             let (s1, r2) = r1.split_first_chunk::<16>().unwrap();
@@ -60,7 +59,7 @@ fn encode_shorts_varint_avx2(
 
         let Some(in_32) = source
             .get(source_offset..source_offset + 32)
-            .and_then(|s| s.first_chunk::<32>())
+            .and_then(|slice| slice.first_chunk::<32>())
         else {
             break;
         };
@@ -137,17 +136,17 @@ fn encode_shorts_varint_avx2(
             let out_32 = destination[destination_offset..destination_offset + 32]
                 .first_chunk_mut::<32>()
                 .unwrap();
-            let mut local_off = 0usize;
+            let mut local_offset = 0usize;
             for &value in s0 {
                 let is_two = (value >= 128) as usize;
-                let b0 = (value & 0x7F) | ((is_two as u16) << 7);
-                let out = b0 | ((value >> 7) << 8);
-                let idx = local_off.min(30);
-                out_32[idx..idx + 2].copy_from_slice(&out.to_le_bytes());
-                local_off += 1 + is_two;
+                let byte0 = (value & 0x7F) | ((is_two as u16) << 7);
+                let packed = byte0 | ((value >> 7) << 8);
+                let byte_index = local_offset.min(30);
+                out_32[byte_index..byte_index + 2].copy_from_slice(&packed.to_le_bytes());
+                local_offset += 1 + is_two;
             }
             source_offset += 16;
-            destination_offset += local_off;
+            destination_offset += local_offset;
             continue;
         }
 
@@ -159,8 +158,6 @@ fn encode_shorts_varint_avx2(
     (source_offset, destination_offset)
 }
 
-/// Encodes shorts from `src_ptr` into VarInt bytes at `dest_ptr` (up to `dest_len` bytes).
-/// Returns the number of bytes written to `dest_ptr`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn encode_shorts_varint(
     src_ptr: *const u16,
@@ -172,13 +169,25 @@ pub unsafe extern "C" fn encode_shorts_varint(
         return 0;
     }
 
-    let source = unsafe { core::slice::from_raw_parts(src_ptr, src_len as usize) };
+    let element_count = src_len as usize;
     let destination = unsafe { core::slice::from_raw_parts_mut(dest_ptr, dest_len as usize) };
+    if !src_ptr.is_aligned() {
+        let mut aligned_source = vec![0u16; element_count];
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                src_ptr as *const u8,
+                aligned_source.as_mut_ptr() as *mut u8,
+                element_count * core::mem::size_of::<u16>(),
+            );
+        }
+        return encode_shorts_varint_slice(&aligned_source, destination);
+    }
 
+    let source = unsafe { core::slice::from_raw_parts(src_ptr, element_count) };
     encode_shorts_varint_slice(source, destination)
 }
 
-fn encode_shorts_varint_slice(source: &[u16], destination: &mut [u8]) -> u64 {
+pub(crate) fn encode_shorts_varint_slice(source: &[u16], destination: &mut [u8]) -> u64 {
     #[cfg(target_arch = "x86_64")]
     let (mut source_offset, mut destination_offset) = if is_x86_feature_detected!("avx2") {
         unsafe { encode_shorts_varint_avx2(source, destination, 0, 0) }
@@ -192,18 +201,18 @@ fn encode_shorts_varint_slice(source: &[u16], destination: &mut [u8]) -> u64 {
     let safe_end = source.len().saturating_sub(4);
     while source_offset < safe_end {
         if source_offset + 4 <= safe_end {
-            if let Some((new_src, new_dest)) =
+            if let Some((new_source, new_destination)) =
                 encode_parallel_4(source, source_offset, destination, destination_offset)
             {
-                source_offset = new_src;
-                destination_offset = new_dest;
+                source_offset = new_source;
+                destination_offset = new_destination;
                 continue;
             }
-            if let Some((new_src, new_dest)) =
+            if let Some((new_source, new_destination)) =
                 encode_parallel_4_two_bytes(source, source_offset, destination, destination_offset)
             {
-                source_offset = new_src;
-                destination_offset = new_dest;
+                source_offset = new_source;
+                destination_offset = new_destination;
                 continue;
             }
         }

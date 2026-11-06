@@ -2,7 +2,6 @@ use super::decode_swar::{decode_single, decode_varint_shorts_swar};
 #[cfg(target_arch = "x86_64")]
 use super::decode_swar::{decode_single_from_packed, decode_varint_shorts_swar_4};
 
-/// Decodes 32 or 64 VarInts at a time using AVX2, with branchless 16-wide decoding for mixed 1/2-byte streams.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 fn decode_varint_shorts_avx2(
@@ -21,17 +20,17 @@ fn decode_varint_shorts_avx2(
     let mask_007f_128 = _mm_set1_epi16(0x007F);
     let mask_3f80_128 = _mm_set1_epi16(0x3F80u16 as i16);
 
-    let src_len = source.len();
-    let dst_len = destination.len();
+    let source_length = source.len();
+    let destination_length = destination.len();
 
-    while source_offset + 32 <= src_len && destination_offset + 32 <= dst_len {
+    while source_offset + 32 <= source_length && destination_offset + 32 <= destination_length {
         while let (Some(in_64), Some(out_64)) = (
             source
                 .get(source_offset..source_offset + 64)
-                .and_then(|s| s.first_chunk::<64>()),
+                .and_then(|slice| slice.first_chunk::<64>()),
             destination
                 .get_mut(destination_offset..destination_offset + 64)
-                .and_then(|d| d.first_chunk_mut::<64>()),
+                .and_then(|slice| slice.first_chunk_mut::<64>()),
         ) {
             let (b0, b1_slice) = in_64.split_first_chunk::<32>().unwrap();
             let b1: &[u8; 32] = b1_slice.try_into().unwrap();
@@ -65,10 +64,10 @@ fn decode_varint_shorts_avx2(
         let (Some(in_32), Some(out_32)) = (
             source
                 .get(source_offset..source_offset + 32)
-                .and_then(|s| s.first_chunk::<32>()),
+                .and_then(|slice| slice.first_chunk::<32>()),
             destination
                 .get_mut(destination_offset..destination_offset + 32)
-                .and_then(|d| d.first_chunk_mut::<32>()),
+                .and_then(|slice| slice.first_chunk_mut::<32>()),
         ) else {
             break;
         };
@@ -131,28 +130,28 @@ fn decode_varint_shorts_avx2(
         }
 
         if (mask & (mask >> 1)) == 0 {
-            let mut local_off = 0usize;
+            let mut local_offset = 0usize;
             for slot in &mut out_32[..16] {
-                let idx = local_off.min(30);
-                let w = u16::from_le_bytes([in_32[idx], in_32[idx + 1]]);
-                let is_two = (w >> 7) & 1;
+                let byte_index = local_offset.min(30);
+                let word = u16::from_le_bytes([in_32[byte_index], in_32[byte_index + 1]]);
+                let is_two = (word >> 7) & 1;
                 let high_mask = 0u16.wrapping_sub(is_two);
-                let val = (w & 0x007F) | (((w >> 1) & 0x3F80) & high_mask);
-                *slot = val;
-                local_off += 1 + (is_two as usize);
+                let value = (word & 0x007F) | (((word >> 1) & 0x3F80) & high_mask);
+                *slot = value;
+                local_offset += 1 + (is_two as usize);
             }
-            source_offset += local_off;
+            source_offset += local_offset;
             destination_offset += 16;
             continue;
         }
 
         let prefix_ones = mask.trailing_zeros() as usize;
         if prefix_ones > 0 {
-            for (dst_slot, &src_byte) in out_32[..prefix_ones]
+            for (destination_slot, &source_byte) in out_32[..prefix_ones]
                 .iter_mut()
                 .zip(&in_32[..prefix_ones])
             {
-                *dst_slot = u16::from(src_byte);
+                *destination_slot = u16::from(source_byte);
             }
             source_offset += prefix_ones;
             destination_offset += prefix_ones;
@@ -161,14 +160,14 @@ fn decode_varint_shorts_avx2(
         if let (Some(bytes), Some(slot)) = (
             source
                 .get(source_offset..source_offset + 4)
-                .and_then(|s| s.first_chunk::<4>()),
+                .and_then(|slice| slice.first_chunk::<4>()),
             destination.get_mut(destination_offset),
         ) {
             let packed = u32::from_le_bytes(*bytes);
             match decode_single_from_packed(packed, source_offset) {
-                Some((value, new_src)) => {
+                Some((value, new_source_offset)) => {
                     *slot = value;
-                    source_offset = new_src;
+                    source_offset = new_source_offset;
                     destination_offset += 1;
                 }
                 None => break,
@@ -181,11 +180,6 @@ fn decode_varint_shorts_avx2(
     (source_offset, destination_offset)
 }
 
-/// Decodes VarInt bytes from `src_ptr` into shorts at `dest_ptr`.
-/// Returns the number of bytes read from `src_ptr` on success (>= 0),
-/// or a negative error code:
-/// -1: Truncated input (a VarInt was cut off before completing).
-/// -2: Incomplete output (buffer contained fewer VarInts than expected_size).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn decode_varint_shorts(
     src_ptr: *const u8,
@@ -193,21 +187,40 @@ pub unsafe extern "C" fn decode_varint_shorts(
     dest_ptr: *mut u16,
     expected_size: u32,
 ) -> i64 {
+    let expected_count = expected_size as usize;
+    if expected_count == 0 {
+        return 0;
+    }
     if src_ptr.is_null() || dest_ptr.is_null() {
         return -1;
     }
 
     let source = unsafe { core::slice::from_raw_parts(src_ptr, src_len as usize) };
-    let destination = unsafe { core::slice::from_raw_parts_mut(dest_ptr, expected_size as usize) };
+    if !dest_ptr.is_aligned() {
+        let mut aligned_destination = vec![0u16; expected_count];
+        let status = decode_varint_shorts_slice(source, &mut aligned_destination);
+        if status >= 0 {
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    aligned_destination.as_ptr() as *const u8,
+                    dest_ptr as *mut u8,
+                    expected_count * core::mem::size_of::<u16>(),
+                );
+            }
+        }
+        return status;
+    }
 
+    let destination = unsafe { core::slice::from_raw_parts_mut(dest_ptr, expected_count) };
     decode_varint_shorts_slice(source, destination)
 }
 
-fn decode_varint_shorts_slice(source: &[u8], destination: &mut [u16]) -> i64 {
+pub(crate) fn decode_varint_shorts_slice(source: &[u8], destination: &mut [u16]) -> i64 {
     #[cfg(target_arch = "x86_64")]
     let (mut source_offset, mut destination_offset) = if is_x86_feature_detected!("avx2") {
-        let (so, doff) = unsafe { decode_varint_shorts_avx2(source, destination, 0, 0) };
-        decode_varint_shorts_swar_4(source, destination, so, doff)
+        let (simd_source, simd_destination) =
+            unsafe { decode_varint_shorts_avx2(source, destination, 0, 0) };
+        decode_varint_shorts_swar_4(source, destination, simd_source, simd_destination)
     } else {
         decode_varint_shorts_swar(source, destination, 0, 0)
     };

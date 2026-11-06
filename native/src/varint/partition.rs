@@ -1,12 +1,11 @@
-/// Counts the number of terminal VarInt bytes (MSB == 0) in the byte slice using AVX2.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-fn count_varint_terminals_avx2(src: &[u8]) -> usize {
+fn count_varint_terminals_avx2(source: &[u8]) -> usize {
     use crate::simd::load_u8x32;
     use core::arch::x86_64::*;
 
     let mut count = 0usize;
-    let (blocks_128, after_128) = src.as_chunks::<128>();
+    let (blocks_128, after_128) = source.as_chunks::<128>();
 
     for block in blocks_128 {
         let (b0, r1) = block.split_first_chunk::<32>().unwrap();
@@ -30,8 +29,8 @@ fn count_varint_terminals_avx2(src: &[u8]) -> usize {
 
     let (blocks_32, tail) = after_128.as_chunks::<32>();
     for chunk in blocks_32 {
-        let vec = load_u8x32(chunk);
-        let mask = _mm256_movemask_epi8(vec) as u32;
+        let vector = load_u8x32(chunk);
+        let mask = _mm256_movemask_epi8(vector) as u32;
         count += 32 - mask.count_ones() as usize;
     }
 
@@ -44,11 +43,10 @@ fn count_varint_terminals_avx2(src: &[u8]) -> usize {
     count
 }
 
-/// Fallback terminal counter using 64-bit SWAR.
 #[inline(always)]
-fn count_varint_terminals_swar(src: &[u8]) -> usize {
+fn count_varint_terminals_swar(source: &[u8]) -> usize {
     let mut count = 0usize;
-    let (chunks, remainder) = src.as_chunks::<8>();
+    let (chunks, remainder) = source.as_chunks::<8>();
 
     for chunk in chunks {
         let packed = u64::from_le_bytes(*chunk);
@@ -67,16 +65,15 @@ fn count_varint_terminals_swar(src: &[u8]) -> usize {
 }
 
 #[inline(always)]
-fn count_varint_terminals_slice(src: &[u8]) -> usize {
+pub(crate) fn count_varint_terminals_slice(source: &[u8]) -> usize {
     #[cfg(target_arch = "x86_64")]
     if is_x86_feature_detected!("avx2") {
-        return unsafe { count_varint_terminals_avx2(src) };
+        return unsafe { count_varint_terminals_avx2(source) };
     }
 
-    count_varint_terminals_swar(src)
+    count_varint_terminals_swar(source)
 }
 
-/// Counts how many terminal VarInt bytes (bytes with MSB == 0) exist in `src_ptr[0..src_len]`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn count_varint_terminals(
     src_ptr: *const u8,
@@ -86,12 +83,33 @@ pub unsafe extern "C" fn count_varint_terminals(
         return 0;
     }
 
-    let src = unsafe { core::slice::from_raw_parts(src_ptr, src_len as usize) };
-    count_varint_terminals_slice(src) as u64
+    let source = unsafe { core::slice::from_raw_parts(src_ptr, src_len as usize) };
+    count_varint_terminals_slice(source) as u64
 }
 
-/// Partitions a VarInt stream into `p` chunks along exact terminal boundaries (MSB = 0).
-/// Writes `p + 1` entries into `out_byte_starts`.
+pub(crate) fn find_varint_boundaries_slice(
+    source: &[u8],
+    partition_count: usize,
+    out_byte_starts: &mut [u64],
+) {
+    let length = source.len();
+    if partition_count == 0 || length == 0 || out_byte_starts.len() <= partition_count {
+        return;
+    }
+
+    let target_chunk = length / partition_count;
+    out_byte_starts[0] = 0;
+    out_byte_starts[partition_count] = length as u64;
+
+    for index in 1..partition_count {
+        let mut boundary = core::cmp::min(length, index * target_chunk);
+        while boundary < length && (source[boundary - 1] & 0x80) != 0 {
+            boundary += 1;
+        }
+        out_byte_starts[index] = boundary as u64;
+    }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn find_varint_boundaries(
     src_ptr: *const u8,
@@ -99,30 +117,31 @@ pub unsafe extern "C" fn find_varint_boundaries(
     partition_count: u32,
     out_byte_starts: *mut u64,
 ) {
-    let p = partition_count as usize;
-    let len = src_len as usize;
+    let partitions = partition_count as usize;
+    let length = src_len as usize;
 
-    if src_ptr.is_null() || out_byte_starts.is_null() || p == 0 || len == 0 {
+    if src_ptr.is_null() || out_byte_starts.is_null() || partitions == 0 || length == 0 {
         return;
     }
 
-    let src = unsafe { core::slice::from_raw_parts(src_ptr, len) };
-    let out = unsafe { core::slice::from_raw_parts_mut(out_byte_starts, p + 1) };
-
-    let target_chunk = len / p;
-    out[0] = 0;
-    out[p] = len as u64;
-
-    for i in 1..p {
-        let mut b = core::cmp::min(len, i * target_chunk);
-        while b < len && (src[b - 1] & 0x80) != 0 {
-            b += 1;
+    let source = unsafe { core::slice::from_raw_parts(src_ptr, length) };
+    if !out_byte_starts.is_aligned() {
+        let mut aligned_starts = vec![0u64; partitions + 1];
+        find_varint_boundaries_slice(source, partitions, &mut aligned_starts);
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                aligned_starts.as_ptr() as *const u8,
+                out_byte_starts as *mut u8,
+                (partitions + 1) * core::mem::size_of::<u64>(),
+            );
         }
-        out[i] = b as u64;
+        return;
     }
+
+    let output = unsafe { core::slice::from_raw_parts_mut(out_byte_starts, partitions + 1) };
+    find_varint_boundaries_slice(source, partitions, output);
 }
 
-/// Identifies VarInt terminal boundaries and computes partition short offsets in a single AVX2 pass.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn partition_varint_stream(
     src_ptr: *const u8,
@@ -132,27 +151,61 @@ pub unsafe extern "C" fn partition_varint_stream(
     out_short_offsets: *mut u32,
     out_short_counts: *mut u32,
 ) -> u64 {
-    let p = partition_count as usize;
-    let len = src_len as usize;
+    let partitions = partition_count as usize;
+    let length = src_len as usize;
 
     if src_ptr.is_null()
         || out_byte_starts.is_null()
         || out_short_offsets.is_null()
         || out_short_counts.is_null()
-        || p == 0
-        || len == 0
+        || partitions == 0
+        || length == 0
     {
         return 0;
     }
 
-    let src = unsafe { core::slice::from_raw_parts(src_ptr, len) };
-    let byte_starts_out = unsafe { core::slice::from_raw_parts_mut(out_byte_starts, p + 1) };
-    let short_offsets_out = unsafe { core::slice::from_raw_parts_mut(out_short_offsets, p) };
-    let short_counts_out = unsafe { core::slice::from_raw_parts_mut(out_short_counts, p) };
+    let source = unsafe { core::slice::from_raw_parts(src_ptr, length) };
+    if !out_byte_starts.is_aligned()
+        || !out_short_offsets.is_aligned()
+        || !out_short_counts.is_aligned()
+    {
+        let mut aligned_starts = vec![0u64; partitions + 1];
+        let mut aligned_offsets = vec![0u32; partitions];
+        let mut aligned_counts = vec![0u32; partitions];
+        let total = partition_varint_stream_slice(
+            source,
+            partitions,
+            &mut aligned_starts,
+            &mut aligned_offsets,
+            &mut aligned_counts,
+        );
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                aligned_starts.as_ptr() as *const u8,
+                out_byte_starts as *mut u8,
+                (partitions + 1) * core::mem::size_of::<u64>(),
+            );
+            core::ptr::copy_nonoverlapping(
+                aligned_offsets.as_ptr() as *const u8,
+                out_short_offsets as *mut u8,
+                partitions * core::mem::size_of::<u32>(),
+            );
+            core::ptr::copy_nonoverlapping(
+                aligned_counts.as_ptr() as *const u8,
+                out_short_counts as *mut u8,
+                partitions * core::mem::size_of::<u32>(),
+            );
+        }
+        return total;
+    }
+
+    let byte_starts_out = unsafe { core::slice::from_raw_parts_mut(out_byte_starts, partitions + 1) };
+    let short_offsets_out = unsafe { core::slice::from_raw_parts_mut(out_short_offsets, partitions) };
+    let short_counts_out = unsafe { core::slice::from_raw_parts_mut(out_short_counts, partitions) };
 
     partition_varint_stream_slice(
-        src,
-        p,
+        source,
+        partitions,
         byte_starts_out,
         short_offsets_out,
         short_counts_out,
@@ -160,53 +213,29 @@ pub unsafe extern "C" fn partition_varint_stream(
 }
 
 fn partition_varint_stream_slice(
-    src: &[u8],
-    p: usize,
+    source: &[u8],
+    partitions: usize,
     out_byte_starts: &mut [u64],
     out_short_offsets: &mut [u32],
     out_short_counts: &mut [u32],
 ) -> u64 {
-    let len = src.len();
-    let target_chunk = len / p;
-    let mut stack_starts = [0usize; 65];
-    let mut heap_starts = Vec::new();
-    let starts_slice: &mut [usize] = if p <= 64 {
-        &mut stack_starts[..=p]
-    } else {
-        heap_starts.resize(p + 1, 0);
-        &mut heap_starts
-    };
-
-    starts_slice[0] = 0;
-    starts_slice[p] = len;
-
-    for i in 1..p {
-        let mut b = core::cmp::min(len, i * target_chunk);
-        while b < len && (src[b - 1] & 0x80) != 0 {
-            b += 1;
-        }
-        starts_slice[i] = b;
-    }
-
+    find_varint_boundaries_slice(source, partitions, out_byte_starts);
     let mut running_short_offset = 0u32;
 
-    for i in 0..p {
-        let start = starts_slice[i];
-        let end = starts_slice[i + 1];
-
-        out_byte_starts[i] = start as u64;
+    for index in 0..partitions {
+        let start = out_byte_starts[index] as usize;
+        let end = out_byte_starts[index + 1] as usize;
 
         let terminals = if end > start {
-            count_varint_terminals_slice(&src[start..end]) as u32
+            count_varint_terminals_slice(&source[start..end]) as u32
         } else {
             0u32
         };
 
-        out_short_offsets[i] = running_short_offset;
-        out_short_counts[i] = terminals;
+        out_short_offsets[index] = running_short_offset;
+        out_short_counts[index] = terminals;
         running_short_offset += terminals;
     }
 
-    out_byte_starts[p] = len as u64;
     running_short_offset as u64
 }

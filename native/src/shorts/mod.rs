@@ -1,9 +1,13 @@
 pub mod lut;
 pub mod ops;
+pub mod parallel;
 pub mod scan;
 
 pub use lut::translate_shorts_lut;
 pub use ops::{fill_shorts, replace_shorts};
+pub use parallel::{
+    totem_fill_shorts_parallel, totem_replace_shorts_parallel, totem_translate_shorts_lut_parallel,
+};
 pub use scan::{count_matching_shorts, scan_matching_shorts};
 
 #[cfg(test)]

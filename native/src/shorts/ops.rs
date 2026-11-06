@@ -6,12 +6,26 @@ pub unsafe extern "C" fn replace_shorts(
     target: i16,
     replacement: i16,
 ) {
-    if data.is_null() || len == 0 {
+    let count = len as usize;
+    if data.is_null() || count == 0 {
+        return;
+    }
+    if !data.is_aligned() {
+        for index in 0..count {
+            let element_ptr = unsafe { data.add(index) };
+            let current = unsafe { element_ptr.read_unaligned() };
+            if current == target {
+                unsafe { element_ptr.write_unaligned(replacement) };
+            }
+        }
         return;
     }
 
-    let slice = unsafe { core::slice::from_raw_parts_mut(data, len as usize) };
+    let slice = unsafe { core::slice::from_raw_parts_mut(data, count) };
+    replace_shorts_slice(slice, target, replacement);
+}
 
+pub(crate) fn replace_shorts_slice(slice: &mut [i16], target: i16, replacement: i16) {
     #[cfg(target_arch = "x86_64")]
     if is_x86_feature_detected!("avx2") {
         unsafe { replace_shorts_avx2(slice, target, replacement) };
@@ -70,12 +84,22 @@ pub unsafe extern "C" fn fill_shorts(
     len: u64,
     value: i16,
 ) {
-    if data.is_null() || len == 0 {
+    let count = len as usize;
+    if data.is_null() || count == 0 {
+        return;
+    }
+    if !data.is_aligned() {
+        for index in 0..count {
+            unsafe { data.add(index).write_unaligned(value) };
+        }
         return;
     }
 
-    let slice = unsafe { core::slice::from_raw_parts_mut(data, len as usize) };
+    let slice = unsafe { core::slice::from_raw_parts_mut(data, count) };
+    fill_shorts_slice(slice, value);
+}
 
+pub(crate) fn fill_shorts_slice(slice: &mut [i16], value: i16) {
     #[cfg(target_arch = "x86_64")]
     if is_x86_feature_detected!("avx2") {
         unsafe { fill_shorts_avx2(slice, value) };

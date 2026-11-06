@@ -4,11 +4,15 @@ mod decode_swar;
 pub mod encode;
 #[forbid(unsafe_code)]
 mod encode_swar;
+pub mod parallel;
 pub mod partition;
 pub mod size;
 
 pub use decode::decode_varint_shorts;
 pub use encode::encode_shorts_varint;
+pub use parallel::{
+    totem_decode_varint_shorts_parallel, totem_encode_shorts_varint_parallel, totem_varint_partition_sizes,
+};
 pub use partition::{count_varint_terminals, find_varint_boundaries, partition_varint_stream};
 pub use size::varint_encoded_size;
 

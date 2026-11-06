@@ -1,11 +1,15 @@
 [package]
 name = "totem-sys"
-version = "2.0.2"
+version = "2.0.3"
 edition = "2024"
 
 [lib]
 name = "totem_sys"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+libdeflate-sys = "1.26.1"
+rayon = "1.12"
 
 [profile.release]
 opt-level = 3
