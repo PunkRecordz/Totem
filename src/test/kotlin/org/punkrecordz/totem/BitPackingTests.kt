@@ -2,10 +2,12 @@ package org.punkrecordz.totem
 
 import org.junit.jupiter.api.Test
 import org.punkrecordz.totem.codec.BlockDataCodec
+import org.punkrecordz.totem.ffi.TotemBitPackSys
 import org.punkrecordz.totem.impl.native.NativeShortView
 import org.punkrecordz.totem.view.toBitPackedLongArray
 import org.punkrecordz.totem.view.toBitPackedShortArray
 import java.lang.foreign.Arena
+import java.lang.foreign.MemorySegment
 import java.util.Random
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -69,6 +71,36 @@ class BitPackingTests {
                         )
                     }
                 }
+            }
+        }
+    }
+
+    @Test
+    fun testSectionShortFastPathExactParityWithNativeFfi() {
+        val random = Random(2026)
+
+        for (bitsPerEntry in 1..16) {
+            for (precise in booleanArrayOf(false, true)) {
+                // include signed negative short patterns (high bits set) to verify masking parity
+                val shortEntries = ShortArray(4096) { random.nextInt(65536).toShort() }
+                val jvmPacked = BlockDataCodec.packShorts(shortEntries, bitsPerEntry, precise)
+
+                val expectedLongCount = BlockDataCodec.calculatePackedLongCount(4096, bitsPerEntry, precise)
+                val nativePacked = LongArray(expectedLongCount)
+                TotemBitPackSys.packShortsToLongs(
+                    MemorySegment.ofArray(shortEntries),
+                    4096L,
+                    MemorySegment.ofArray(nativePacked),
+                    expectedLongCount.toLong(),
+                    bitsPerEntry,
+                    precise,
+                    bigEndianDestination = false,
+                )
+
+                assertTrue(
+                    nativePacked.contentEquals(jvmPacked),
+                    "Section 4096 JVM fast-path mismatch vs native FFI for bitsPerEntry=$bitsPerEntry, precise=$precise",
+                )
             }
         }
     }

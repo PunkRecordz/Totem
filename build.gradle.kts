@@ -118,6 +118,22 @@ tasks.register<JavaExec>("runJmh") {
     )
 }
 
+tasks.register<JavaExec>("runAnvilBench") {
+    dependsOn(copyNativeLibrary, tasks.processResources, tasks.testClasses)
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass = "org.punkrecordz.totem.bench.AnvilThroughputBenchmarkKt"
+    systemProperties(
+        System.getProperties()
+            .filterKeys { propertyKey -> propertyKey.toString().startsWith("totem.bench.") }
+            .mapKeys { (propertyKey, _) -> propertyKey.toString() },
+    )
+    jvmArgs(
+        "--enable-native-access=ALL-UNNAMED",
+        "-Xms2g",
+        "-Xmx4g",
+    )
+}
+
 tasks.register<JavaExec>("runVarIntJmh") {
     dependsOn(copyNativeLibrary, tasks.processResources, tasks.testClasses)
     classpath = sourceSets["test"].runtimeClasspath
