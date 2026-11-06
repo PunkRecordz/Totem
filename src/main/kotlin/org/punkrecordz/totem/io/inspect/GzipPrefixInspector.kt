@@ -2,9 +2,10 @@ package org.punkrecordz.totem.io.inspect
 
 import org.punkrecordz.totem.ffi.TotemSys
 import org.punkrecordz.totem.io.FileChannelIo
-import org.punkrecordz.totem.io.memory.OffHeapScratchBuffer
+import org.punkrecordz.totem.io.compression.CompressionScratch
 import java.lang.foreign.MemorySegment
 import java.lang.foreign.ValueLayout
+import java.lang.ref.Reference
 import java.nio.ByteOrder
 import java.nio.channels.FileChannel
 import java.util.zip.Inflater
@@ -32,80 +33,93 @@ internal object GzipPrefixInspector {
         }
 
         val inflater = rawGzipInflater.get()
+        val scratch = CompressionScratch.get()
         val inputLimit = inputSegment.byteSize()
         var currentMemberStart = startCompressedOffset
         var remainingToSkip = initialBytesToSkip
         var totalWritten = 0L
-        val skipScratchSegment = if (remainingToSkip > 0L) {
-            OffHeapScratchBuffer.getCompressionBuffer().acquire(64 * 1024L)
-        } else {
-            null
-        }
 
-        while (totalWritten < maxBytesToWrite && currentMemberStart + 6L <= inputLimit) {
-            val deflateStart = skipGzipHeader(inputSegment, currentMemberStart, inputLimit)
-            if (deflateStart < 0L) {
-                break
+        try {
+            while (totalWritten < maxBytesToWrite && currentMemberStart + 6L <= inputLimit) {
+                val deflateStart = skipGzipHeader(inputSegment, currentMemberStart, inputLimit)
+                if (deflateStart < 0L) {
+                    break
+                }
+
+                inflater.reset()
+                var compressedCursor = deflateStart
+
+                while ((remainingToSkip > 0L || totalWritten < maxBytesToWrite) && !inflater.finished()) {
+                    if (inflater.needsInput()) {
+                        val remainingCompressed = inputLimit - compressedCursor
+                        if (remainingCompressed <= 0L) {
+                            break
+                        }
+
+                        val chunkLength = minOf(
+                            remainingCompressed,
+                            CompressionScratch.STREAM_WINDOW_BYTES.toLong(),
+                        ).toInt()
+                        val inputWindow = scratch.copyToStreamInputBuffer(inputSegment, compressedCursor, chunkLength)
+                        inflater.setInput(inputWindow)
+                        compressedCursor += chunkLength.toLong()
+                    }
+
+                    if (remainingToSkip > 0L) {
+                        val skipChunk = minOf(
+                            remainingToSkip,
+                            CompressionScratch.STREAM_WINDOW_BYTES.toLong(),
+                        ).toInt()
+                        val skipped = inflater.inflate(scratch.prepareStreamOutputWindow(skipChunk))
+                        remainingToSkip -= skipped.toLong()
+                        if (skipped == 0 && (inflater.needsDictionary() || (!inflater.finished() && !inflater.needsInput()))) {
+                            break
+                        }
+                    } else {
+                        val writeChunk = minOf(
+                            maxBytesToWrite - totalWritten,
+                            CompressionScratch.STREAM_WINDOW_BYTES.toLong(),
+                        ).toInt()
+                        val bytesInflated = inflater.inflate(scratch.prepareStreamOutputWindow(writeChunk))
+                        if (bytesInflated > 0) {
+                            MemorySegment.copy(
+                                scratch.streamWindowSegment,
+                                0L,
+                                outputSegment,
+                                outputOffset + totalWritten,
+                                bytesInflated.toLong(),
+                            )
+                            totalWritten += bytesInflated.toLong()
+                        } else if (inflater.needsDictionary() || (!inflater.finished() && !inflater.needsInput())) {
+                            break
+                        }
+                    }
+                }
+
+                if (!inflater.finished()) {
+                    break
+                }
+
+                val nextMemberStart = deflateStart + inflater.bytesRead + 8L
+                if (nextMemberStart <= currentMemberStart || nextMemberStart + 18L > inputLimit) {
+                    break
+                }
+
+                val nextId1 = inputSegment.get(ValueLayout.JAVA_BYTE, nextMemberStart).toInt() and 0xFF
+                val nextId2 = inputSegment.get(ValueLayout.JAVA_BYTE, nextMemberStart + 1L).toInt() and 0xFF
+                if (nextId1 != 0x1F || nextId2 != 0x8B) {
+                    break
+                }
+
+                currentMemberStart = nextMemberStart
             }
 
+            return totalWritten
+        } finally {
             inflater.reset()
-            var compressedCursor = deflateStart
-
-            while ((remainingToSkip > 0L || totalWritten < maxBytesToWrite) && !inflater.finished()) {
-                if (inflater.needsInput()) {
-                    val remainingCompressed = inputLimit - compressedCursor
-                    if (remainingCompressed <= 0L) {
-                        break
-                    }
-
-                    val chunkLength = minOf(remainingCompressed, 16L * 1024 * 1024)
-                    val inputBuffer = inputSegment.asSlice(compressedCursor, chunkLength).asByteBuffer()
-                    inflater.setInput(inputBuffer)
-                    compressedCursor += chunkLength
-                }
-
-                if (remainingToSkip > 0L && skipScratchSegment != null) {
-                    val skipChunk = minOf(remainingToSkip, skipScratchSegment.byteSize())
-                    val skipBuffer = skipScratchSegment.asSlice(0L, skipChunk).asByteBuffer()
-                    val skipped = inflater.inflate(skipBuffer)
-                    remainingToSkip -= skipped.toLong()
-                    if (skipped == 0 && (inflater.needsDictionary() || (!inflater.finished() && !inflater.needsInput()))) {
-                        break
-                    }
-                } else {
-                    val targetBuffer = outputSegment.asSlice(
-                        outputOffset + totalWritten,
-                        maxBytesToWrite - totalWritten,
-                    ).asByteBuffer()
-
-                    val bytesInflated = inflater.inflate(targetBuffer)
-                    totalWritten += bytesInflated.toLong()
-
-                    if (bytesInflated == 0 && (inflater.needsDictionary() || (!inflater.finished() && !inflater.needsInput()))) {
-                        break
-                    }
-                }
-            }
-
-            if (!inflater.finished()) {
-                break
-            }
-
-            val nextMemberStart = deflateStart + inflater.bytesRead + 8L
-            if (nextMemberStart <= currentMemberStart || nextMemberStart + 18L > inputLimit) {
-                break
-            }
-
-            val nextId1 = inputSegment.get(ValueLayout.JAVA_BYTE, nextMemberStart).toInt() and 0xFF
-            val nextId2 = inputSegment.get(ValueLayout.JAVA_BYTE, nextMemberStart + 1L).toInt() and 0xFF
-            if (nextId1 != 0x1F || nextId2 != 0x8B) {
-                break
-            }
-
-            currentMemberStart = nextMemberStart
+            Reference.reachabilityFence(inputSegment)
+            Reference.reachabilityFence(outputSegment)
         }
-
-        return totalWritten
     }
 
     fun skipGzipHeader(

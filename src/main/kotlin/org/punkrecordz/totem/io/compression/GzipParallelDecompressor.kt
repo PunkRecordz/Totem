@@ -13,7 +13,7 @@ internal object GzipParallelDecompressor {
 
     private const val MIN_GZIP_MEMBER_BYTES: Long = 18L
     private const val DIRECT_SINGLE_MEMBER_INPUT_LIMIT_BYTES: Long = 64L * 1024L
-    private const val MAX_SPECULATIVE_ALLOCATION_BYTES: Long = 512L * 1024L * 1024L
+    private const val MAX_SPECULATIVE_ALLOCATION_BYTES: Long = 2_147_483_647L
     private const val MAX_DEFLATE_EXPANSION_RATIO: Long = 1032L
 
     private val LITTLE_ENDIAN_INT: ValueLayout.OfInt =
@@ -114,7 +114,7 @@ internal object GzipParallelDecompressor {
 
         val firstOffsetValid = memberCount > 0 && offsetsSegment.get(ValueLayout.JAVA_LONG_UNALIGNED, 0L) == 0L
 
-        if (firstOffsetValid && memberCount == 1 && inputSize <= Int.MAX_VALUE.toLong()) {
+        if (firstOffsetValid && memberCount == 1) {
             val expectedSize = nativeInput.get(LITTLE_ENDIAN_INT, inputSize - 4L).toLong() and 0xFFFFFFFFL
 
             when {
@@ -145,8 +145,8 @@ internal object GzipParallelDecompressor {
         }
 
         if (firstOffsetValid && memberCount in 2 until CompressionScratch.MAX_SCANNED_GZIP_MEMBERS) {
-            val totalUncompressedSize = sumMemberUncompressedSizes(nativeInput, offsetsSegment, memberCount)
-            if (totalUncompressedSize in 0L..maxSpeculativeBytes) {
+            val totalUncompressedSize = sumValidatedMemberUncompressedSizes(nativeInput, offsetsSegment, memberCount)
+            if (totalUncompressedSize >= 0L) {
                 val outputSegment = allocateTarget(totalUncompressedSize, targetArena, scratch)
                 val producedBytes = TotemCodecSys.gzipInflateMembers(
                     source = nativeInput,
@@ -164,7 +164,7 @@ internal object GzipParallelDecompressor {
         return GzipStreamFallback.decompressStreaming(nativeInput, targetArena, scratch)
     }
 
-    private fun sumMemberUncompressedSizes(
+    private fun sumValidatedMemberUncompressedSizes(
         nativeInput: MemorySegment,
         offsetsSegment: MemorySegment,
         memberCount: Int,
@@ -180,24 +180,32 @@ internal object GzipParallelDecompressor {
                 else -> inputSize
             }
 
-            if (memberStart < 0L || memberEnd > inputSize || memberEnd - memberStart < MIN_GZIP_MEMBER_BYTES) {
+            val memberCompressedBytes = memberEnd - memberStart
+            if (memberStart < 0L || memberEnd > inputSize || memberCompressedBytes < MIN_GZIP_MEMBER_BYTES) {
                 return -1L
             }
 
             val memberUncompressedSize = nativeInput.get(LITTLE_ENDIAN_INT, memberEnd - 4L).toLong() and 0xFFFFFFFFL
+            val memberMaxUncompressed = expansionBoundFor(memberCompressedBytes)
+            if (memberUncompressedSize > memberMaxUncompressed) {
+                return -1L
+            }
+            if (Long.MAX_VALUE - totalUncompressedSize < memberUncompressedSize) {
+                return -1L
+            }
+
             totalUncompressedSize += memberUncompressedSize
         }
 
         return totalUncompressedSize
     }
 
-    private fun maxSpeculativeBytesFor(inputSize: Long): Long {
-        val theoreticalBound = when {
-            inputSize > Long.MAX_VALUE / MAX_DEFLATE_EXPANSION_RATIO -> Long.MAX_VALUE
-            else -> inputSize * MAX_DEFLATE_EXPANSION_RATIO
-        }
+    private fun maxSpeculativeBytesFor(inputSize: Long): Long =
+        minOf(MAX_SPECULATIVE_ALLOCATION_BYTES, expansionBoundFor(inputSize))
 
-        return minOf(MAX_SPECULATIVE_ALLOCATION_BYTES, theoreticalBound)
+    private fun expansionBoundFor(compressedBytes: Long): Long = when {
+        compressedBytes > Long.MAX_VALUE / MAX_DEFLATE_EXPANSION_RATIO -> Long.MAX_VALUE
+        else -> compressedBytes * MAX_DEFLATE_EXPANSION_RATIO
     }
 
     private fun copyToTargetOrReturnSlice(

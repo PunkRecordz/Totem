@@ -17,18 +17,20 @@ internal class CompressionScratch {
     val gzipMemberOffsetsSegment: MemorySegment =
         allocateAligned(MAX_SCANNED_GZIP_MEMBERS.toLong() * ValueLayout.JAVA_LONG.byteSize())
 
+    private val streamInputSegment: MemorySegment = allocateAligned(STREAM_WINDOW_BYTES.toLong())
+    private val streamInputByteBuffer: ByteBuffer = streamInputSegment.asByteBuffer()
+
+    val streamWindowSegment: MemorySegment = allocateAligned(STREAM_WINDOW_BYTES.toLong())
+    private val streamWindowByteBuffer: ByteBuffer = streamWindowSegment.asByteBuffer()
+
     private var sliceDescriptorsSegment: MemorySegment =
         allocateAligned(INITIAL_DESCRIPTOR_CAPACITY.toLong() * DESCRIPTOR_STRIDE_BYTES)
 
     var outputSegment: MemorySegment = allocateAligned(INITIAL_OUTPUT_CAPACITY_BYTES)
         private set
 
-    private var cachedOutputByteBuffer: ByteBuffer = outputSegment.asByteBuffer()
-
     var inputSegment: MemorySegment = allocateAligned(INITIAL_INPUT_CAPACITY_BYTES)
         private set
-
-    private var cachedInputByteBuffer: ByteBuffer = inputSegment.asByteBuffer()
 
     val outputCapacity: Long
         get() = outputSegment.byteSize()
@@ -68,7 +70,6 @@ internal class CompressionScratch {
         }
 
         outputSegment = grownSegment
-        cachedOutputByteBuffer = grownSegment.asByteBuffer()
 
         return grownSegment
     }
@@ -83,17 +84,6 @@ internal class CompressionScratch {
         ensureOutputCapacity(nextCapacity, preservePrefixBytes)
 
         return true
-    }
-
-    fun prepareOutputBuffer(
-        limitBytes: Int = outputSegment.byteSize().toInt(),
-        positionBytes: Int = 0,
-    ): ByteBuffer {
-        cachedOutputByteBuffer.clear()
-        cachedOutputByteBuffer.position(positionBytes)
-        cachedOutputByteBuffer.limit(limitBytes)
-
-        return cachedOutputByteBuffer
     }
 
     fun nativeSource(input: MemorySegment): MemorySegment {
@@ -147,35 +137,38 @@ internal class CompressionScratch {
         return inputSegment
     }
 
-    fun prepareDirectInputBuffer(input: MemorySegment): ByteBuffer {
-        val byteSize = input.byteSize()
-        require(byteSize <= Int.MAX_VALUE.toLong()) {
-            "Direct ByteBuffer input size ($byteSize bytes) exceeds Int.MAX_VALUE"
+    fun copyToStreamInputBuffer(
+        source: MemorySegment,
+        sourceOffset: Long,
+        byteCount: Int,
+    ): ByteBuffer {
+        require(byteCount in 0..STREAM_WINDOW_BYTES) {
+            "Stream input chunk ($byteCount bytes) must be within 0..$STREAM_WINDOW_BYTES"
         }
 
-        if (input.isNative && input.address() != 0L) {
-            return input.asByteBuffer()
+        if (byteCount > 0) {
+            MemorySegment.copy(source, sourceOffset, streamInputSegment, 0L, byteCount.toLong())
         }
 
-        if (byteSize == 0L) {
-            cachedInputByteBuffer.clear()
-            cachedInputByteBuffer.limit(0)
-            return cachedInputByteBuffer
-        }
+        streamInputByteBuffer.clear()
+        streamInputByteBuffer.limit(byteCount)
 
-        if (byteSize > MAX_OUTPUT_CAPACITY_BYTES) {
-            val oversizedInput = allocateAligned(byteSize)
-            MemorySegment.copy(input, 0L, oversizedInput, 0L, byteSize)
-            return oversizedInput.asByteBuffer()
-        }
+        return streamInputByteBuffer
+    }
 
-        ensureInputCapacity(byteSize)
-        MemorySegment.copy(input, 0L, inputSegment, 0L, byteSize)
+    fun prepareStreamOutputWindow(maxBytes: Int = STREAM_WINDOW_BYTES): ByteBuffer {
+        val clampedLimit = minOf(maxBytes, STREAM_WINDOW_BYTES)
+        streamWindowByteBuffer.clear()
+        streamWindowByteBuffer.limit(clampedLimit)
 
-        cachedInputByteBuffer.clear()
-        cachedInputByteBuffer.limit(byteSize.toInt())
+        return streamWindowByteBuffer
+    }
 
-        return cachedInputByteBuffer
+    fun readableStreamOutputWindow(producedBytes: Int): ByteBuffer {
+        streamWindowByteBuffer.clear()
+        streamWindowByteBuffer.limit(producedBytes)
+
+        return streamWindowByteBuffer
     }
 
     private fun ensureInputCapacity(requiredBytes: Long) {
@@ -188,9 +181,7 @@ internal class CompressionScratch {
             nextCapacity = minOf(MAX_OUTPUT_CAPACITY_BYTES, nextCapacity * 2L)
         }
 
-        val grownInput = allocateAligned(nextCapacity)
-        inputSegment = grownInput
-        cachedInputByteBuffer = grownInput.asByteBuffer()
+        inputSegment = allocateAligned(nextCapacity)
     }
 
     companion object {
@@ -198,6 +189,7 @@ internal class CompressionScratch {
         const val ALIGNMENT_BYTES: Long = 64L
         const val INITIAL_OUTPUT_CAPACITY_BYTES: Long = 1L * 1024L * 1024L
         const val MAX_OUTPUT_CAPACITY_BYTES: Long = 16L * 1024L * 1024L
+        const val STREAM_WINDOW_BYTES: Int = 256 * 1024
         const val MAX_SCANNED_GZIP_MEMBERS: Int = 1024
         const val DESCRIPTOR_STRIDE_BYTES: Long = 16L
 

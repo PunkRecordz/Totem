@@ -12,9 +12,6 @@ internal class InflatedStreamState(
 
 internal object DeflateStreamInflater {
 
-    private const val STREAM_INPUT_CHUNK_BYTES: Long = 16L * 1024L * 1024L
-    private const val STREAM_OUTPUT_WINDOW_BYTES: Long = 64L * 1024L * 1024L
-
     fun inflateStream(
         input: MemorySegment,
         startOffset: Long,
@@ -40,39 +37,31 @@ internal object DeflateStreamInflater {
                         )
                     }
 
-                    val chunkLength = minOf(remainingCompressed, STREAM_INPUT_CHUNK_BYTES)
-                    val inputSlice = input.asSlice(compressedCursor, chunkLength)
-                    inflater.setInput(scratch.prepareDirectInputBuffer(inputSlice))
-                    compressedCursor += chunkLength
+                    val chunkLength = minOf(remainingCompressed, CompressionScratch.STREAM_WINDOW_BYTES.toLong()).toInt()
+                    val inputWindow = scratch.copyToStreamInputBuffer(input, compressedCursor, chunkLength)
+                    inflater.setInput(inputWindow)
+                    compressedCursor += chunkLength.toLong()
                 }
 
-                if (totalProduced == activeSegment.byteSize()) {
-                    val nextCapacity = Math.multiplyExact(activeSegment.byteSize(), 2L)
-                    activeSegment = when {
-                        nextCapacity <= CompressionScratch.MAX_OUTPUT_CAPACITY_BYTES ->
-                            scratch.ensureOutputCapacity(nextCapacity, preservePrefixBytes = totalProduced)
-                        else -> {
-                            val grownSegment = CompressionScratch.allocateAligned(nextCapacity)
-                            MemorySegment.copy(activeSegment, 0L, grownSegment, 0L, totalProduced)
-                            grownSegment
-                        }
-                    }
-                }
-
-                val availableSpace = minOf(activeSegment.byteSize() - totalProduced, STREAM_OUTPUT_WINDOW_BYTES).toInt()
-                val destinationBuffer = when {
-                    activeSegment === scratch.outputSegment -> scratch.prepareOutputBuffer(
-                        limitBytes = (totalProduced + availableSpace).toInt(),
-                        positionBytes = totalProduced.toInt(),
-                    )
-                    else -> activeSegment.asSlice(totalProduced, availableSpace.toLong()).asByteBuffer()
-                }
-
-                val previousProduced = totalProduced
-                val producedNow = inflater.inflate(destinationBuffer)
+                // always inflate into an auto-arena scratch window to avoid shared-session ByteBuffer crashes on jdk 21-24
+                val outputWindow = scratch.prepareStreamOutputWindow()
+                val producedNow = inflater.inflate(outputWindow)
                 if (producedNow > 0) {
-                    totalProduced += producedNow.toLong()
-                    crc32?.update(activeSegment.asSlice(previousProduced, producedNow.toLong()).asByteBuffer())
+                    crc32?.update(scratch.readableStreamOutputWindow(producedNow))
+
+                    val requiredCapacity = Math.addExact(totalProduced, producedNow.toLong())
+                    if (requiredCapacity > activeSegment.byteSize()) {
+                        activeSegment = growDestinationSegment(activeSegment, totalProduced, requiredCapacity, scratch)
+                    }
+
+                    MemorySegment.copy(
+                        scratch.streamWindowSegment,
+                        0L,
+                        activeSegment,
+                        totalProduced,
+                        producedNow.toLong(),
+                    )
+                    totalProduced = requiredCapacity
                 } else {
                     if (inflater.needsDictionary()) {
                         throw IllegalArgumentException("$formatName stream requires an unsupported preset dictionary")
@@ -87,6 +76,29 @@ internal object DeflateStreamInflater {
         } finally {
             Reference.reachabilityFence(input)
         }
+    }
+
+    private fun growDestinationSegment(
+        currentSegment: MemorySegment,
+        preservedBytes: Long,
+        requiredCapacity: Long,
+        scratch: CompressionScratch,
+    ): MemorySegment {
+        var nextCapacity = maxOf(1L, currentSegment.byteSize())
+        while (nextCapacity < requiredCapacity) {
+            nextCapacity = Math.multiplyExact(nextCapacity, 2L)
+        }
+
+        if (nextCapacity <= CompressionScratch.MAX_OUTPUT_CAPACITY_BYTES) {
+            return scratch.ensureOutputCapacity(nextCapacity, preservePrefixBytes = preservedBytes)
+        }
+
+        val grownSegment = CompressionScratch.allocateAligned(nextCapacity)
+        if (preservedBytes > 0L) {
+            MemorySegment.copy(currentSegment, 0L, grownSegment, 0L, preservedBytes)
+        }
+
+        return grownSegment
     }
 
 }
